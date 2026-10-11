@@ -54,6 +54,7 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
                 p.editor.close_find();
             }
         }
+        "resources" => app.toggle_resources(),
         "term" => {
             if let Some(p) = app.active_project() {
                 p.terminals.feed(&format!("{arg}\n"));

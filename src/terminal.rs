@@ -18,6 +18,7 @@ use gtk::{gio, glib, pango};
 use vte4::prelude::*;
 
 use crate::icons::codicon;
+use crate::procmon::process_name;
 use crate::theme::ThemeModel;
 
 /// No output for this long → idle.
@@ -62,36 +63,6 @@ impl Term {
     fn label(&self) -> String {
         self.job.borrow().clone().unwrap_or_else(|| self.shell_name.clone())
     }
-}
-
-/// Display name of a process group leader: `claude`, `cargo`, `npm`… For interpreters
-/// (`node script`, `python3 -m x`) the script name is used, like VS Code.
-fn process_name(pid: i32) -> Option<String> {
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    let comm = comm.trim();
-    let base = |s: &str| -> String {
-        let b = s.rsplit('/').next().unwrap_or(s);
-        b.strip_suffix(".exe").or_else(|| b.strip_suffix(".js")).or_else(|| b.strip_suffix(".mjs"))
-            .or_else(|| b.strip_suffix(".py")).unwrap_or(b).to_string()
-    };
-    let interpreter = matches!(comm, "node" | "bun" | "deno" | "python" | "python3" | "ruby" | "perl" | "sh" | "bash");
-    if interpreter {
-        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        let args: Vec<String> = cmdline.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
-        let mut it = args.iter().skip(1);
-        while let Some(a) = it.next() {
-            if a == "-m" {
-                return it.next().map(|m| m.to_string());
-            }
-            if a == "-c" || a == "-e" {
-                break;
-            }
-            if !a.starts_with('-') && !a.is_empty() {
-                return Some(base(a));
-            }
-        }
-    }
-    Some(base(comm))
 }
 
 /// Panel-level events for the window (rail badges, notifications).
@@ -504,6 +475,11 @@ impl TerminalPanel {
         }
     }
 
+    /// (tab label, shell pid) per terminal, for resource sampling.
+    pub fn shells(&self) -> Vec<(String, i32)> {
+        self.terms.borrow().iter().filter(|t| t.shell_pid.get() > 0).map(|t| (t.label(), t.shell_pid.get())).collect()
+    }
+
     /// Foreground jobs (other than the shell) running in this panel's terminals.
     pub fn running_jobs(&self) -> Vec<String> {
         self.terms.borrow().iter().filter_map(|t| t.foreground_pgid().and_then(process_name)).collect()
@@ -518,14 +494,3 @@ fn apply_colors(term: &vte4::Terminal, theme: &ThemeModel) {
     term.set_color_cursor(Some(&theme.get("terminalCursor.foreground").gdk()));
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_own_process() {
-        let me = std::process::id() as i32;
-        let name = process_name(me).unwrap();
-        assert!(!name.is_empty() && !name.contains('/'));
-    }
-}

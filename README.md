@@ -8,8 +8,8 @@ seventh of the memory.
 Linux only. Rust + GTK4 + VTE. MIT licensed. See [SPEC.md](SPEC.md) for scope and
 [PLAN.md](PLAN.md) for architecture and measurements.
 
-> Status: **Phases 1–3 done** (projects, tabs, live reload, file finder, find, themes,
-> terminal naming + "finished" badges, git decorations). Coming next: resource panel,
+> Status: **Phases 1–4 done** (projects, tabs, live reload, file finder, find, themes,
+> terminal naming + "finished" badges, git decorations, resource panel). Coming next:
 > `vibey .` single instance, session restore, packaging.
 
 ## Build
@@ -43,6 +43,7 @@ cargo build --release
 | Ctrl+W, Ctrl+Tab, Ctrl+PageUp/Down | Close tab, cycle tabs |
 | Ctrl+` / Ctrl+Shift+` | Toggle focus editor ↔ terminal / new terminal |
 | Ctrl+K Ctrl+T | Color theme picker (live preview, Escape reverts) |
+| Ctrl+Shift+R | Resource panel: CPU / memory per project → terminal → process, with kill |
 
 Focus in a terminal: only Ctrl+P, Ctrl+1…9 and Ctrl+` are taken. Every other key (Ctrl+W,
 Ctrl+F, Ctrl+K, …) goes to the shell or CLI.

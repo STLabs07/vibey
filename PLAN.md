@@ -198,3 +198,19 @@ Decorations:
 Verified headlessly on a scratch repo: gutter bars on changed lines, tree colors, `main*`, rail
 dot, tab color; `git add -A` cleared the gutter about 1.5 s later via the `.git` watch.
 Memory, target scenario: 97.6 MB GPU / 73.3 MB software.
+
+## Phase 4 results (2026-10-11)
+
+`procmon.rs` reads `/proc` directly. It walks only Vibey's own process tree via
+`/proc/<pid>/task/*/children`, never all of /proc. CPU% comes from utime+stime deltas (100% = one
+core) and memory is PSS from `smaps_rollup`, falling back to RSS. Sampling runs off the UI thread
+every 2 s (1 s while the panel is open) and **only while the window is focused**. Unfocused, it stops.
+
+- Status bar: `Vibey + terminals: 123 MB · 104%`. Click it or press Ctrl+Shift+R for the panel.
+- Rail: memory chip under each avatar (`89M 100%`).
+- Panel: Vibey's own row, then project → terminal → process tree. Sort by memory / CPU / name.
+  A kill button per process asks first, then sends SIGTERM. Footer shows system load and RAM.
+
+Verified headlessly with an 80 MB / 100% CPU test process. Memory, target scenario: 98.3 MB GPU /
+73.9 MB software. Startup is 302 ms. Idle CPU with the window focused is 0.5% of one core
+(cursor blink + sampler).

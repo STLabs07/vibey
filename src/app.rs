@@ -14,7 +14,9 @@ use crate::config::{self, Config};
 use crate::editor::Status;
 use crate::icons::codicon;
 use crate::project::{FileProvider, Project};
+use crate::procmon::{self, Prev};
 use crate::quickopen::{self, Item, Provider, QuickPick};
+use crate::resources::{ProjectUsage, ResourcePanel};
 use crate::theme::{self, Kind, ThemeModel};
 
 thread_local! {
@@ -34,6 +36,7 @@ pub struct App {
     stack: gtk::Stack,
     status_project: gtk::Label,
     status_branch: gtk::Label,
+    status_res: gtk::Label,
     status_right: gtk::Box,
     status_pos: gtk::Label,
     status_indent: gtk::Label,
@@ -45,6 +48,9 @@ pub struct App {
     css: gtk::CssProvider,
     config: RefCell<Config>,
     quick: Rc<QuickPick>,
+    resources: Rc<ResourcePanel>,
+    prev_sample: RefCell<Prev>,
+    sampling: Cell<bool>,
     scale: f64,
     chord: Cell<bool>,
     allow_close: Cell<bool>,
@@ -155,8 +161,11 @@ impl App {
         status.add_css_class("statusbar");
         let status_project = label("", "");
         let status_branch = label("", "");
+        let status_res = label("", "status-res");
+        status_res.set_tooltip_text(Some("Vibey + terminals: memory (PSS) and CPU. Click for details (Ctrl+Shift+R)."));
         status.append(&status_project);
         status.append(&status_branch);
+        status.append(&status_res);
         let sp = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         sp.set_hexpand(true);
         status.append(&sp);
@@ -176,8 +185,10 @@ impl App {
         outer.append(&status);
 
         let quick = QuickPick::new(scale);
+        let resources = ResourcePanel::new(scale);
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&outer));
+        overlay.add_overlay(&resources.widget);
         overlay.add_overlay(&quick.widget);
         window.set_child(Some(&overlay));
 
@@ -200,6 +211,7 @@ impl App {
             stack,
             status_project,
             status_branch,
+            status_res,
             status_right,
             status_pos,
             status_indent,
@@ -211,6 +223,9 @@ impl App {
             css,
             config: RefCell::new(cfg),
             quick,
+            resources,
+            prev_sample: RefCell::new(Prev::default()),
+            sampling: Cell::new(false),
             scale,
             chord: Cell::new(false),
             allow_close: Cell::new(false),
@@ -241,9 +256,24 @@ impl App {
                     if let Some(p) = a.active_project() {
                         p.refresh_git();
                     }
+                    a.start_sampling();
                 }
             }
         });
+        let click = gtk::GestureClick::new();
+        let me = Rc::downgrade(&app_rc);
+        click.connect_pressed(move |_, _, _, _| {
+            if let Some(a) = me.upgrade() {
+                a.toggle_resources();
+            }
+        });
+        app_rc.status_res.add_controller(click);
+        let me = Rc::downgrade(&app_rc);
+        app_rc.resources.set_on_killed(Rc::new(move || {
+            if let Some(a) = me.upgrade() {
+                a.sample_once();
+            }
+        }));
         app_rc.install_shortcuts();
         app_rc.install_close_guard();
         app_rc.update_status();
@@ -344,9 +374,13 @@ impl App {
         holder.add_overlay(&dirty);
         holder.set_halign(gtk::Align::Center);
         holder.set_valign(gtk::Align::Center);
-        holder.set_vexpand(true);
+        holder.set_margin_top((10.0 * self.scale) as i32);
+        holder.set_margin_bottom((10.0 * self.scale) as i32);
         item.set_valign(gtk::Align::Start);
         item.append(&holder);
+        let chip = label("", "res-chip");
+        chip.set_visible(false);
+        item.append(&chip);
         let click = gtk::GestureClick::new();
         click.set_button(0);
         let me = Rc::downgrade(self);
@@ -396,6 +430,7 @@ impl App {
 
     /// Start the active project's terminal once the window exists (see main: GSK_RENDERER).
     pub fn on_realized(self: &Rc<Self>) {
+        self.start_sampling();
         if let Some(p) = self.active_project() {
             if !p.terminals_started.replace(true) {
                 p.terminals.add_terminal(&current_theme());
@@ -604,6 +639,80 @@ impl App {
         self.window.set_title(Some(&title));
     }
 
+    // ---- resource sampling (only while the window is focused) ----
+
+    pub fn start_sampling(self: &Rc<Self>) {
+        if !self.sampling.replace(true) {
+            self.sample_once();
+        }
+    }
+
+    fn sample_once(self: &Rc<Self>) {
+        let projects: Vec<(String, Vec<(String, i32)>)> =
+            self.projects.borrow().iter().map(|(p, _)| (p.name.clone(), p.terminals.shells())).collect();
+        let pids: Vec<i32> = projects.iter().flat_map(|(_, t)| t.iter().map(|(_, pid)| *pid)).collect();
+        let prev = self.prev_sample.borrow().clone();
+        let me = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let res = gio::spawn_blocking(move || procmon::sample(&pids, &prev)).await;
+            let Some(a) = me.upgrade() else { return };
+            if let Ok((report, next)) = res {
+                *a.prev_sample.borrow_mut() = next;
+                a.show_usage(report, projects);
+            }
+            // Keep going only while someone can see it.
+            if a.window.is_active() && a.window.is_visible() {
+                let interval = if a.resources.is_open() { 1000 } else { 2000 };
+                let me = Rc::downgrade(&a);
+                glib::timeout_add_local_once(Duration::from_millis(interval), move || {
+                    if let Some(a) = me.upgrade() {
+                        a.sample_once();
+                    }
+                });
+            } else {
+                a.sampling.set(false);
+            }
+        });
+    }
+
+    fn show_usage(&self, report: procmon::Report, projects: Vec<(String, Vec<(String, i32)>)>) {
+        let mut roots = report.roots.iter();
+        let usage: Vec<ProjectUsage> = projects
+            .into_iter()
+            .map(|(name, terms)| ProjectUsage {
+                name,
+                terminals: terms.into_iter().map(|(label, _)| (label, roots.next().cloned().flatten())).collect(),
+            })
+            .collect();
+        self.status_res.set_markup(&format!(
+            "<span font_family=\"codicon\">{}</span> {} · {:.0}%",
+            codicon::PULSE,
+            procmon::fmt_mem(report.total_mem_kb),
+            report.total_cpu
+        ));
+        for ((_, item), u) in self.projects.borrow().iter().zip(&usage) {
+            let (cpu, mem) = u.totals();
+            if let Some(chip) = item.last_child().and_downcast::<gtk::Label>() {
+                chip.set_visible(mem > 0);
+                chip.set_text(&if cpu >= 1.0 {
+                    format!("{} {:.0}%", procmon::fmt_mem_short(mem), cpu)
+                } else {
+                    procmon::fmt_mem_short(mem)
+                });
+            }
+        }
+        self.resources.update(Rc::new(report), Rc::new(usage));
+    }
+
+    pub fn toggle_resources(self: &Rc<Self>) {
+        if self.resources.is_open() {
+            self.resources.close();
+        } else {
+            self.resources.open();
+            self.start_sampling();
+        }
+    }
+
     // ---- status bar ----
 
     fn update_status(&self) {
@@ -720,6 +829,10 @@ impl App {
         if self.quick.is_open() {
             return false;
         }
+        if self.resources.is_open() && key == Key::Escape {
+            self.resources.close();
+            return true;
+        }
         let ctrl = mods.contains(M::CONTROL_MASK);
         let shift = mods.contains(M::SHIFT_MASK);
         let alt = mods.contains(M::ALT_MASK);
@@ -765,6 +878,10 @@ impl App {
                 true
             }
             _ if in_terminal => false,
+            Key::r if shift => {
+                self.toggle_resources();
+                true
+            }
             Key::k => {
                 self.chord.set(true);
                 true

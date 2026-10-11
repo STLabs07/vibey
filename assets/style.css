@@ -17,7 +17,7 @@ window.vibey label { color: inherit; }
   min-width: {{48}};
 }
 .rail .project {
-  min-width: {{46}}; min-height: {{48}};
+  min-width: {{46}};
   color: @vs_activityBar_inactiveForeground;
   border-left: {{2}} solid transparent;
 }
@@ -169,6 +169,21 @@ gutter { background-color: @vs_editor_background; }
 .term-tab.attention { color: @vs_panelTitle_activeForeground; }
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.25; } 100% { opacity: 1; } }
 
+/* resources */
+.status-res:hover { color: @vs_foreground; }
+.rail .res-chip { font-size: {{~9}}; color: @vs_activityBar_inactiveForeground; margin-top: {{-8}}; margin-bottom: {{6}}; }
+.res-header { padding: 0 0 {{6}} {{6}}; }
+.res-title { font-weight: 700; }
+.res-sort { padding: 0 {{8}}; min-height: {{22}}; }
+.res-sort:checked { background-color: @vs_list_inactiveSelectionBackground; }
+.res-grid { padding: 0 {{6}}; }
+.res-grid label { min-height: {{22}}; }
+.res-colhead { color: @vs_descriptionForeground; font-size: {{~11}}; }
+.res-num { font-feature-settings: "tnum"; }
+.res-vibey { color: @vs_list_highlightForeground; }
+.res-project { font-weight: 700; }
+.res-terminal { color: @vs_descriptionForeground; }
+
 /* git decorations (explorer rows, tabs) */
 .git-badge { margin: 0 {{12}} 0 {{4}}; font-size: {{~12}}; }
 .git-modified, .git-modified label { color: @vs_gitDecoration_modifiedResourceForeground; }
@@ -183,6 +198,7 @@ listview.tree > row:selected .git-badge { color: inherit; }
 .tab.git-untracked .tab-label { color: @vs_gitDecoration_untrackedResourceForeground; }
 .tab.git-added .tab-label { color: @vs_gitDecoration_addedResourceForeground; }
 .tab.git-conflict .tab-label { color: @vs_gitDecoration_conflictingResourceForeground; }
+.rail .dirty, .rail .badge { font-size: 1px; padding: 0; }
 .rail .dirty {
   min-width: {{6}}; min-height: {{6}};
   margin: 0 {{-2}} {{-2}} 0;
