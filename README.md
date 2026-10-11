@@ -8,9 +8,8 @@ seventh of the memory.
 Linux only. Rust + GTK4 + VTE. MIT licensed. See [SPEC.md](SPEC.md) for scope and
 [PLAN.md](PLAN.md) for architecture and measurements.
 
-> Status: **Phases 1–4 done** (projects, tabs, live reload, file finder, find, themes,
-> terminal naming + "finished" badges, git decorations, resource panel). Coming next:
-> `vibey .` single instance, session restore, packaging.
+> Status: **v0.1, phases 0–5 done.** About 97 MB with 3 projects and 6 terminals
+> (VS Code: 547 MB with one). Starts in about 0.3 s.
 
 ## Build
 
@@ -26,12 +25,24 @@ Rust (stable, via [rustup](https://rustup.rs)):
 cargo build --release
 ```
 
+## Install
+
+```sh
+scripts/install.sh          # builds, installs ~/.local/bin/vibey + app menu entry (no sudo)
+scripts/package-deb.sh      # or build target/vibey_0.1.0_amd64.deb
+```
+
 ## Run
 
 ```sh
-./target/release/vibey ~/code/app ~/code/api          # open several projects
-./target/release/vibey . --open src/main.rs            # open a file in the first project
+vibey .                      # add/focus this folder in the running Vibey (starts it if needed)
+vibey ~/code/app ~/code/api  # several projects
+vibey . --open src/main.rs   # and open a file
+vibey                        # just start: restores last session's projects, tabs, terminals
 ```
+
+`vibey .` also works from a terminal inside Vibey. Open projects, pinned tabs and terminal
+folders are restored on the next start.
 
 ## Keys
 

@@ -46,6 +46,7 @@ pub struct EditorGroup {
     active: Cell<Option<usize>>,
     on_status: RefCell<Option<Rc<dyn Fn(Option<Status>)>>>,
     on_reload: RefCell<Option<Rc<dyn Fn()>>>,
+    on_tabs_changed: RefCell<Option<Rc<dyn Fn()>>>,
     git: RefCell<Rc<crate::git::Status>>,
     me: RefCell<Weak<EditorGroup>>,
 }
@@ -125,6 +126,7 @@ impl EditorGroup {
             active: Cell::new(None),
             on_status: RefCell::new(None),
             on_reload: RefCell::new(None),
+            on_tabs_changed: RefCell::new(None),
             git: RefCell::new(Rc::new(crate::git::Status::default())),
             me: RefCell::new(Weak::new()),
         });
@@ -194,6 +196,24 @@ impl EditorGroup {
     /// Called when an open file changed on disk and was reloaded.
     pub fn set_on_reload(&self, f: Rc<dyn Fn()>) {
         *self.on_reload.borrow_mut() = Some(f);
+    }
+
+    /// Called when tabs are opened, closed or switched (session saving).
+    pub fn set_on_tabs_changed(&self, f: Rc<dyn Fn()>) {
+        *self.on_tabs_changed.borrow_mut() = Some(f);
+    }
+
+    fn tabs_changed(&self) {
+        let f = self.on_tabs_changed.borrow().clone();
+        if let Some(f) = f {
+            f();
+        }
+    }
+
+    /// Paths of pinned tabs (preview tabs are transient), and the active one.
+    pub fn session(&self) -> (Vec<PathBuf>, Option<PathBuf>) {
+        let files = self.tabs.borrow().iter().filter(|t| !t.preview.get()).map(|t| t.view.path()).collect();
+        (files, self.active_tab().map(|t| t.view.path()))
     }
 
     /// Git decoration colors on tab titles, like VS Code.
@@ -355,6 +375,7 @@ impl EditorGroup {
             t.preview.set(false);
             t.widget.remove_css_class("preview");
         }
+        self.tabs_changed();
     }
 
     pub fn activate(&self, i: usize) {
@@ -370,6 +391,7 @@ impl EditorGroup {
             self.run_find();
         }
         self.emit_status();
+        self.tabs_changed();
     }
 
     pub fn close(&self, i: usize) {
@@ -385,6 +407,7 @@ impl EditorGroup {
         if n == 0 {
             self.update_chrome();
             self.emit_status();
+            self.tabs_changed();
         } else {
             // VS Code focuses the tab to the right (or the new last one).
             let next = match active {

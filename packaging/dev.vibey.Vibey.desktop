@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Vibey
+GenericName=Project Viewer
+Comment=Read-only, VS Code-shaped window for coding with terminal AI CLIs
+Exec=vibey %F
+Icon=dev.vibey.Vibey
+Terminal=false
+Categories=Development;IDE;
+Keywords=code;viewer;terminal;claude;ai;git;
+StartupNotify=true
+StartupWMClass=vibey

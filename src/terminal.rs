@@ -83,6 +83,8 @@ pub struct TerminalPanel {
     visible: Cell<bool>,
     scale: f64,
     on_event: RefCell<Option<Rc<dyn Fn(Event)>>>,
+    /// Working directories to reopen terminals in (session restore).
+    restore: RefCell<Vec<PathBuf>>,
     me: RefCell<Weak<TerminalPanel>>,
 }
 
@@ -131,13 +133,14 @@ impl TerminalPanel {
             visible: Cell::new(false),
             scale,
             on_event: RefCell::new(None),
+            restore: RefCell::new(Vec::new()),
             me: RefCell::new(Weak::new()),
         });
         *panel.me.borrow_mut() = Rc::downgrade(&panel);
         let weak = Rc::downgrade(&panel);
         add.connect_clicked(move |_| {
             if let Some(p) = weak.upgrade() {
-                p.add_terminal(&crate::app::current_theme());
+                p.add_terminal(&crate::app::current_theme(), None);
             }
         });
         panel
@@ -158,7 +161,40 @@ impl TerminalPanel {
         self.terms.borrow().is_empty()
     }
 
-    pub fn add_terminal(&self, theme: &ThemeModel) {
+    /// Terminals to reopen (in these directories) when the panel first starts.
+    pub fn set_restore(&self, cwds: Vec<PathBuf>) {
+        *self.restore.borrow_mut() = cwds;
+    }
+
+    /// Open the panel's initial terminals: the restored ones, or one in the project root.
+    pub fn start(&self, theme: &ThemeModel) {
+        let cwds = std::mem::take(&mut *self.restore.borrow_mut());
+        if cwds.is_empty() {
+            self.add_terminal(theme, None);
+        }
+        for cwd in cwds {
+            self.add_terminal(theme, Some(&cwd));
+        }
+        if !self.is_empty() {
+            self.activate(0);
+        }
+    }
+
+    /// Restore list not yet used (project never activated this session).
+    pub fn pending_restore(&self) -> Vec<PathBuf> {
+        self.restore.borrow().clone()
+    }
+
+    /// Current working directory of each terminal's shell.
+    pub fn cwds(&self) -> Vec<PathBuf> {
+        self.terms
+            .borrow()
+            .iter()
+            .map(|t| std::fs::read_link(format!("/proc/{}/cwd", t.shell_pid.get())).unwrap_or_else(|_| self.cwd.clone()))
+            .collect()
+    }
+
+    pub fn add_terminal(&self, theme: &ThemeModel, cwd: Option<&Path>) {
         let term = vte4::Terminal::new();
         term.set_hexpand(true);
         term.set_vexpand(true);
@@ -251,9 +287,10 @@ impl TerminalPanel {
         });
 
         let wt = Rc::downgrade(&t);
+        let dir = cwd.filter(|d| d.is_dir()).unwrap_or(&self.cwd);
         term.spawn_async(
             vte4::PtyFlags::DEFAULT,
-            self.cwd.to_str(),
+            dir.to_str(),
             &[&shell()],
             &[],
             glib::SpawnFlags::DEFAULT,

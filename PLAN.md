@@ -214,3 +214,23 @@ every 2 s (1 s while the panel is open) and **only while the window is focused**
 Verified headlessly with an 80 MB / 100% CPU test process. Memory, target scenario: 98.3 MB GPU /
 73.9 MB software. Startup is 302 ms. Idle CPU with the window focused is 0.5% of one core
 (cursor blink + sampler).
+
+## Phase 5 results (2026-10-11)
+
+- **Single instance:** GtkApplication + `HANDLES_COMMAND_LINE` over D-Bus. `vibey DIR…` from any
+  terminal, including one inside Vibey, adds or focuses projects in the running window. A
+  forwarding call exits in ~25 ms without initializing GTK. Relative paths resolve against the
+  caller's directory.
+- **Session** (`~/.config/vibey/session.json`, debounced 1 s, atomic): projects, pinned tabs,
+  active file, window size/maximized, and each terminal's working directory (read from
+  `/proc/<shell>/cwd`). Terminals reopen as fresh shells there. `--new-instance`, measurements and
+  self-tests never read or write the session.
+- **Packaging:** `scripts/install.sh` (no sudo: `~/.local/bin`, menu entry, icon) and
+  `scripts/package-deb.sh` (plain `dpkg-deb`, depends on libgtk-4-1, libvte-2.91-gtk4-0, git).
+  Release builds are stripped with thin LTO. Binary is 12.7 MB, most of it embedded grammars.
+
+Verified on the real display with an isolated `XDG_CONFIG_HOME`: forwarding, session save,
+restore after restart (projects, tab, gutter, terminal cwd).
+Final numbers: startup 293 ms median. Target scenario 96.9 MB GPU / 74.5 MB software
+(VS Code with one file and one terminal: 547 MB). Idle CPU 0.5% of one core while focused,
+and no sampling while unfocused.

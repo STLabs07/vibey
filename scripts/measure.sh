@@ -30,7 +30,7 @@ echo "== memory after ${SETTLE}s settle =="
 printf "%-8s %-6s %10s %10s %14s\n" renderer terms "PSS MB" "RSS MB" "shells PSS MB"
 for renderer in ngl gl cairo; do
   for terms in 2 6; do
-    GSK_RENDERER=$renderer "$BIN" "$DIR" --open "$OPEN" --terminals "$terms" >/dev/null 2>&1 &
+    GSK_RENDERER=$renderer "$BIN" --new-instance "$DIR" --open "$OPEN" --terminals "$terms" >/dev/null 2>&1 &
     pid=$!
     sleep "$SETTLE"
     printf "%-8s %-6s %10.1f %10.1f %14.1f\n" "$renderer" "$terms" \

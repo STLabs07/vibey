@@ -17,6 +17,7 @@ use crate::project::{FileProvider, Project};
 use crate::procmon::{self, Prev};
 use crate::quickopen::{self, Item, Provider, QuickPick};
 use crate::resources::{ProjectUsage, ResourcePanel};
+use crate::session::{self, ProjectState, Session};
 use crate::theme::{self, Kind, ThemeModel};
 
 thread_local! {
@@ -54,6 +55,9 @@ pub struct App {
     scale: f64,
     chord: Cell<bool>,
     allow_close: Cell<bool>,
+    /// Test/measurement runs: don't read or write the user's session.
+    ephemeral: bool,
+    save_pending: Cell<bool>,
     me: RefCell<Weak<App>>,
 }
 
@@ -110,7 +114,7 @@ fn initials(name: &str) -> String {
 }
 
 impl App {
-    pub fn new(app: &gtk::Application, cfg: Config) -> Rc<App> {
+    pub fn new(app: &gtk::Application, cfg: Config, ephemeral: bool) -> Rc<App> {
         let scale = ui_scale();
         let window = gtk::ApplicationWindow::builder()
             .application(app)
@@ -229,6 +233,8 @@ impl App {
             scale,
             chord: Cell::new(false),
             allow_close: Cell::new(false),
+            ephemeral,
+            save_pending: Cell::new(false),
             me: RefCell::new(Weak::new()),
         });
         *app_rc.me.borrow_mut() = Rc::downgrade(&app_rc);
@@ -343,6 +349,12 @@ impl App {
             }
         }));
         let me = Rc::downgrade(self);
+        project.editor.set_on_tabs_changed(Rc::new(move || {
+            if let Some(a) = me.upgrade() {
+                a.schedule_save();
+            }
+        }));
+        let me = Rc::downgrade(self);
         let weak_p = Rc::downgrade(&project);
         project.set_on_git(Rc::new(move || {
             if let (Some(a), Some(p)) = (me.upgrade(), weak_p.upgrade()) {
@@ -421,8 +433,9 @@ impl App {
         self.update_visibility();
         // Terminals start once the window is realized (see `on_realized`).
         if self.window.is_realized() && !project.terminals_started.replace(true) {
-            project.terminals.add_terminal(&current_theme());
+            project.terminals.start(&current_theme());
         }
+        self.schedule_save();
         self.update_status();
         self.show_branch(&project);
         project.refresh_git();
@@ -433,7 +446,7 @@ impl App {
         self.start_sampling();
         if let Some(p) = self.active_project() {
             if !p.terminals_started.replace(true) {
-                p.terminals.add_terminal(&current_theme());
+                p.terminals.start(&current_theme());
             }
         }
     }
@@ -490,6 +503,7 @@ impl App {
         self.stack.remove(&project.page);
         let n = self.projects.borrow().len();
         self.active.set(None);
+        self.schedule_save();
         if n == 0 {
             self.stack.set_visible_child_name("welcome");
             self.update_title();
@@ -532,6 +546,7 @@ impl App {
         self.window.connect_close_request(move |w| {
             let Some(a) = me.upgrade() else { return glib::Propagation::Proceed };
             if a.allow_close.get() {
+                a.save_session();
                 return glib::Propagation::Proceed;
             }
             let jobs: Vec<String> = a
@@ -541,6 +556,7 @@ impl App {
                 .flat_map(|(p, _)| p.running_jobs().into_iter().map(|j| format!("{j} ({})", p.name)).collect::<Vec<_>>())
                 .collect();
             if jobs.is_empty() {
+                a.save_session();
                 return glib::Propagation::Proceed;
             }
             let w = w.clone();
@@ -565,6 +581,7 @@ impl App {
     fn on_terminal_event(self: &Rc<Self>, project: &Rc<Project>, ev: crate::terminal::Event) {
         // Terminal activity (an AI CLI working, a command finishing) usually means files changed.
         project.refresh_git();
+        self.schedule_save();
         if let crate::terminal::Event::Finished(job) = &ev {
             let unfocused = !self.window.is_active();
             if unfocused && self.config.borrow().notifications {
@@ -637,6 +654,66 @@ impl App {
         let name = self.active_project().map(|p| format!("{} — Vibey", p.name)).unwrap_or_else(|| "Vibey".into());
         let title = if attention { format!("● {name}") } else { name };
         self.window.set_title(Some(&title));
+    }
+
+    // ---- session ----
+
+    /// Reopen projects, files and terminals from the last session.
+    pub fn restore(self: &Rc<Self>, s: &Session) {
+        if s.width > 0 && s.height > 0 {
+            self.window.set_default_size(s.width, s.height);
+        }
+        if s.maximized {
+            self.window.maximize();
+        }
+        for ps in &s.projects {
+            let Some(p) = self.add_project(&ps.root) else { continue };
+            p.terminals.set_restore(ps.terminals.clone());
+            for f in ps.files.iter().filter(|f| f.is_file()) {
+                p.open_file(f, true);
+            }
+            if let Some(f) = ps.active_file.as_ref().filter(|f| f.is_file()) {
+                p.open_file(f, true);
+            }
+        }
+        if !s.projects.is_empty() {
+            self.activate(s.active.min(self.projects.borrow().len().saturating_sub(1)));
+        }
+    }
+
+    fn snapshot(&self) -> Session {
+        let projects = self
+            .projects
+            .borrow()
+            .iter()
+            .map(|(p, _)| {
+                let (files, active_file) = p.editor.session();
+                let terminals = if p.terminals_started.get() { p.terminals.cwds() } else { p.terminals.pending_restore() };
+                ProjectState { root: p.root.clone(), files, active_file, terminals }
+            })
+            .collect();
+        let (width, height) = self.window.default_size();
+        Session { projects, active: self.active.get().unwrap_or(0), width, height, maximized: self.window.is_maximized() }
+    }
+
+    pub fn save_session(&self) {
+        if !self.ephemeral {
+            session::save(&self.snapshot());
+        }
+    }
+
+    /// Debounced save after projects, tabs or terminals change.
+    fn schedule_save(self: &Rc<Self>) {
+        if self.ephemeral || self.save_pending.replace(true) {
+            return;
+        }
+        let me = Rc::downgrade(self);
+        glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+            if let Some(a) = me.upgrade() {
+                a.save_pending.set(false);
+                a.save_session();
+            }
+        });
     }
 
     // ---- resource sampling (only while the window is focused) ----
@@ -866,11 +943,11 @@ impl App {
             Key::grave | Key::dead_grave => {
                 if let Some(p) = project {
                     if shift {
-                        p.terminals.add_terminal(&current_theme());
+                        p.terminals.add_terminal(&current_theme(), None);
                     } else if in_terminal {
                         p.editor.focus();
                     } else if p.terminals.is_empty() {
-                        p.terminals.add_terminal(&current_theme());
+                        p.terminals.add_terminal(&current_theme(), None);
                     } else {
                         p.terminals.focus();
                     }

@@ -14,3 +14,7 @@ serde_json = "1.0.152"
 similar = "3.2.0"
 toml = "1.1.8"
 vte4 = { version = "0.10", features = ["v0_76"] }
+
+[profile.release]
+strip = true
+lto = "thin"
