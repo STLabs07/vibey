@@ -158,3 +158,20 @@ without highlighting, and files over 8 MB show a notice.
 
 irosashi upstream bug to report: with two rules for the same selector, the first wins
 (vscode-textmate: the last wins). Worked around in `theme::dedupe_rules`.
+
+## Phase 2 results (2026-10-11)
+
+Terminal tabs are named after the foreground process (`claude`, `cargo`, `sleep`…). For
+interpreters (`node script`) the script name is used. Status: running (output in the last 1.5 s,
+pulsing dot), idle, or finished-unseen. The last means a busy stretch ≥ 3 s ended, a long
+foreground job exited, or the bell rang while that terminal wasn't on screen with the window
+focused. It rolls up to a rail badge (pulsing ring = working, blue dot = finished) and a `●`
+prefix in the window title. When Vibey isn't focused it also sends a desktop notification
+(`notifications = false` turns that off). Kill-terminal × on each tab asks first if a job is running.
+
+All of it is event-driven: VTE `contents-changed` / `bell` / `child-exited`, plus one one-shot timer
+armed by output. An idle terminal costs no wakeups.
+
+Verified headlessly: busy script → running badge, switch away → "finished" dot on that project,
+switch back → cleared, `sleep` shows as the tab name.
+Memory, target scenario: 96.6 MB GPU / 73.3 MB software. Startup is 293 ms median.

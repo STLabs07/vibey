@@ -161,6 +161,32 @@ gutter { background-color: @vs_editor_background; }
 .panel-tab.active { color: @vs_panelTitle_activeForeground; background-color: @vs_list_inactiveSelectionBackground; }
 .term-tab { padding: 0 {{8}}; color: @vs_panelTitle_inactiveForeground; }
 .term-tab label.codicon { margin-right: {{4}}; }
+.term-tab .close { opacity: 0; margin-left: {{4}}; font-size: {{~14}}; }
+.term-tab:hover .close { opacity: 0.8; }
+.term-tab .status-dot { font-family: "codicon"; font-size: {{~10}}; margin-left: {{4}}; }
+.term-tab.running .status-dot { color: @vs_focusBorder; animation: pulse 1.2s ease-in-out infinite; }
+.term-tab.attention .status-dot { color: @vs_activityBarBadge_background; }
+.term-tab.attention { color: @vs_panelTitle_activeForeground; }
+@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.25; } 100% { opacity: 1; } }
+
+/* rail badges: running = pulsing ring, attention = filled dot */
+.rail .badge {
+  min-width: {{8}}; min-height: {{8}};
+  margin: {{-3}} {{-3}} 0 0;
+  border-radius: 50%;
+  opacity: 0;
+}
+.rail .badge.running {
+  opacity: 1;
+  border: {{2}} solid @vs_activityBar_foreground;
+  background: @vs_activityBar_background;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.rail .badge.attention {
+  opacity: 1;
+  background: @vs_activityBarBadge_background;
+  box-shadow: 0 0 0 {{2}} @vs_activityBar_background;
+}
 .term-tab.active { color: @vs_panelTitle_activeForeground; }
 vte-terminal { padding: 0 {{20}}; background-color: @vs_terminal_background; }
 

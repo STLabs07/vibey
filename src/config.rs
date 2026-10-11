@@ -10,11 +10,13 @@ pub struct Config {
     /// "gpu" (GTK's GL renderer) or "software" (cairo: ~25 MB less memory, more CPU
     /// when scrolling). Takes effect on restart. `GSK_RENDERER` overrides it.
     pub renderer: String,
+    /// Desktop notification when a terminal finishes while Vibey isn't focused.
+    pub notifications: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { theme: crate::theme::DEFAULT_THEME.into(), renderer: "gpu".into() }
+        Config { theme: crate::theme::DEFAULT_THEME.into(), renderer: "gpu".into(), notifications: true }
     }
 }
 

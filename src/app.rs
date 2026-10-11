@@ -230,6 +230,12 @@ impl App {
             }
         });
         gear.set_popover(Some(&app_rc.settings_popover()));
+        let me = Rc::downgrade(&app_rc);
+        app_rc.window.connect_is_active_notify(move |_| {
+            if let Some(a) = me.upgrade() {
+                a.update_visibility();
+            }
+        });
         app_rc.install_shortcuts();
         app_rc.install_close_guard();
         app_rc.update_status();
@@ -291,6 +297,13 @@ impl App {
             }
         }));
         self.stack.add_child(&project.page);
+        let me = Rc::downgrade(self);
+        let weak_p = Rc::downgrade(&project);
+        project.terminals.set_on_event(Rc::new(move |ev| {
+            if let (Some(a), Some(p)) = (me.upgrade(), weak_p.upgrade()) {
+                a.on_terminal_event(&p, ev);
+            }
+        }));
 
         let n = self.projects.borrow().len();
         let item = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -299,10 +312,18 @@ impl App {
         let avatar = label(&initials(&project.name), "avatar");
         let hash = project.name.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
         avatar.add_css_class(&format!("c{}", hash % AVATAR_COLORS));
-        avatar.set_halign(gtk::Align::Center);
-        avatar.set_valign(gtk::Align::Center);
+        let badge = label("", "badge");
+        badge.set_halign(gtk::Align::End);
+        badge.set_valign(gtk::Align::Start);
+        badge.set_can_target(false);
+        let holder = gtk::Overlay::new();
+        holder.set_child(Some(&avatar));
+        holder.add_overlay(&badge);
+        holder.set_halign(gtk::Align::Center);
+        holder.set_valign(gtk::Align::Center);
+        holder.set_vexpand(true);
         item.set_valign(gtk::Align::Start);
-        item.append(&avatar);
+        item.append(&holder);
         let click = gtk::GestureClick::new();
         click.set_button(0);
         let me = Rc::downgrade(self);
@@ -340,7 +361,7 @@ impl App {
         item.add_css_class("active");
         self.active.set(Some(i));
         self.stack.set_visible_child(&project.page);
-        self.window.set_title(Some(&format!("{} — Vibey", project.name)));
+        self.update_visibility();
         // Terminals start once the window is realized (see `on_realized`).
         if self.window.is_realized() && !project.terminals_started.replace(true) {
             project.terminals.add_terminal(&current_theme());
@@ -412,7 +433,7 @@ impl App {
         self.active.set(None);
         if n == 0 {
             self.stack.set_visible_child_name("welcome");
-            self.window.set_title(Some("Vibey"));
+            self.update_title();
             self.update_status();
         } else {
             self.activate(i.min(n - 1));
@@ -478,6 +499,73 @@ impl App {
             );
             glib::Propagation::Stop
         });
+    }
+
+    // ---- terminal status → rail badges, title, notifications ----
+
+    fn on_terminal_event(self: &Rc<Self>, project: &Rc<Project>, ev: crate::terminal::Event) {
+        if let crate::terminal::Event::Finished(job) = &ev {
+            let unfocused = !self.window.is_active();
+            if unfocused && self.config.borrow().notifications {
+                let n = gio::Notification::new(&format!("{job} finished in {}", project.name));
+                n.set_body(Some("Vibey: a terminal went quiet while you were away."));
+                if let Some(app) = self.window.application() {
+                    app.send_notification(Some(&format!("finished-{}", project.name)), &n);
+                }
+            }
+        }
+        self.update_badges();
+    }
+
+    /// Only the active project's panel is "visible", and only while the window is focused.
+    pub fn update_visibility(&self) {
+        let active = self.active_project();
+        let focused = self.window.is_active();
+        for (p, _) in self.projects.borrow().iter() {
+            let on_screen = active.as_ref().is_some_and(|a| Rc::ptr_eq(a, p));
+            p.terminals.set_visible(on_screen && focused);
+        }
+        self.update_badges();
+    }
+
+    fn update_badges(&self) {
+        let mut attention_anywhere = false;
+        for (p, item) in self.projects.borrow().iter() {
+            let (running, attention, job) = p.terminals.summary();
+            attention_anywhere |= attention;
+            let Some(badge) = item
+                .first_child()
+                .and_downcast::<gtk::Overlay>()
+                .and_then(|o| o.last_child())
+                .and_downcast::<gtk::Label>()
+            else {
+                continue;
+            };
+            for c in ["running", "attention"] {
+                badge.remove_css_class(c);
+            }
+            let mut tip = format!("{}\n{}", p.name, p.root.display());
+            if attention {
+                badge.add_css_class("attention");
+                tip.push_str(&format!("\n● {} finished", job.unwrap_or_default()));
+            } else if running {
+                badge.add_css_class("running");
+                tip.push_str("\n◌ working…");
+            }
+            item.set_tooltip_text(Some(&tip));
+        }
+        self.update_title_with(attention_anywhere);
+    }
+
+    fn update_title(&self) {
+        let any = self.projects.borrow().iter().any(|(p, _)| p.terminals.summary().1);
+        self.update_title_with(any);
+    }
+
+    fn update_title_with(&self, attention: bool) {
+        let name = self.active_project().map(|p| format!("{} — Vibey", p.name)).unwrap_or_else(|| "Vibey".into());
+        let title = if attention { format!("● {name}") } else { name };
+        self.window.set_title(Some(&title));
     }
 
     // ---- status bar ----

@@ -4,7 +4,7 @@
 //!
 //! `VIBEY_SELFTEST="wait 800; key ctrl+p; type codev; shot /tmp/a.png; enter; quit"`
 //!
-//! Commands: `wait MS`, `key SPEC` (e.g. ctrl+shift+grave), `type TEXT` (quick pick or
+//! Commands: `term TEXT` (typed into the shown terminal + Enter), `wait MS`, `key SPEC` (e.g. ctrl+shift+grave), `type TEXT` (quick pick or
 //! find box), `enter`, `down`, `escape`, `find TEXT`, `project N`, `theme ID`,
 //! `exec SHELL…`, `shot FILE`, `mem`, `quit`.
 
@@ -52,6 +52,11 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
                 app.quick().cancel();
             } else if let Some(p) = app.active_project() {
                 p.editor.close_find();
+            }
+        }
+        "term" => {
+            if let Some(p) = app.active_project() {
+                p.terminals.feed(&format!("{arg}\n"));
             }
         }
         "find" => {

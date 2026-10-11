@@ -1,10 +1,17 @@
-//! A project's terminal panel: VTE terminals on real PTYs, with tabs.
-//! (Auto-naming and status dots come in phase 2.)
+//! A project's terminal panel: VTE terminals on real PTYs, with tabs named after their
+//! foreground process and a status per terminal.
+//!
+//! Status is event-driven (no polling): VTE's `contents-changed` marks a terminal busy and
+//! arms one quiet-timer; when output stops for `QUIET`, it's idle again. A busy stretch of at
+//! least `SUSTAINED` (an AI CLI working, a long build) that ends while the user isn't
+//! looking at that terminal leaves it "finished, unseen". So does a bell, or a long-running
+//! foreground job exiting.
 
 use std::cell::{Cell, RefCell};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
+use std::time::{Duration, Instant};
 
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
@@ -13,24 +20,85 @@ use vte4::prelude::*;
 use crate::icons::codicon;
 use crate::theme::ThemeModel;
 
+/// No output for this long → idle.
+const QUIET: Duration = Duration::from_millis(1500);
+/// Busy for at least this long before going quiet → worth telling the user.
+const SUSTAINED: Duration = Duration::from_secs(3);
+/// Re-read the foreground process at most this often while output streams.
+const JOB_CHECK: Duration = Duration::from_millis(400);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum State {
+    Idle,
+    Running,
+    /// Finished (or rang the bell) while the user was looking elsewhere.
+    Attention,
+}
+
 struct Term {
     term: vte4::Terminal,
     chip: gtk::Box,
+    dot: gtk::Label,
+    name: gtk::Label,
     shell_pid: Cell<i32>,
+    shell_name: String,
+    job: RefCell<Option<String>>,
+    job_since: Cell<Option<Instant>>,
+    job_checked: Cell<Option<Instant>>,
+    state: Cell<State>,
+    last_output: Cell<Instant>,
+    busy_since: Cell<Option<Instant>>,
+    timer_armed: Cell<bool>,
 }
 
 impl Term {
-    /// Name of the foreground job if it isn't the shell itself (e.g. "claude", "node").
-    fn foreground_job(&self) -> Option<String> {
+    fn foreground_pgid(&self) -> Option<i32> {
         let pty = self.term.pty()?;
         let pgid = unsafe { libc::tcgetpgrp(pty.fd().as_raw_fd()) };
         let shell = self.shell_pid.get();
-        if pgid <= 0 || shell <= 0 || pgid == shell {
-            return None;
-        }
-        let comm = std::fs::read_to_string(format!("/proc/{pgid}/comm")).ok()?;
-        Some(comm.trim().to_string())
+        (pgid > 0 && shell > 0 && pgid != shell).then_some(pgid)
     }
+
+    fn label(&self) -> String {
+        self.job.borrow().clone().unwrap_or_else(|| self.shell_name.clone())
+    }
+}
+
+/// Display name of a process group leader: `claude`, `cargo`, `npm`… For interpreters
+/// (`node script`, `python3 -m x`) the script name is used, like VS Code.
+fn process_name(pid: i32) -> Option<String> {
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let comm = comm.trim();
+    let base = |s: &str| -> String {
+        let b = s.rsplit('/').next().unwrap_or(s);
+        b.strip_suffix(".exe").or_else(|| b.strip_suffix(".js")).or_else(|| b.strip_suffix(".mjs"))
+            .or_else(|| b.strip_suffix(".py")).unwrap_or(b).to_string()
+    };
+    let interpreter = matches!(comm, "node" | "bun" | "deno" | "python" | "python3" | "ruby" | "perl" | "sh" | "bash");
+    if interpreter {
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let args: Vec<String> = cmdline.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+        let mut it = args.iter().skip(1);
+        while let Some(a) = it.next() {
+            if a == "-m" {
+                return it.next().map(|m| m.to_string());
+            }
+            if a == "-c" || a == "-e" {
+                break;
+            }
+            if !a.starts_with('-') && !a.is_empty() {
+                return Some(base(a));
+            }
+        }
+    }
+    Some(base(comm))
+}
+
+/// Panel-level events for the window (rail badges, notifications).
+pub enum Event {
+    Changed,
+    /// A terminal needs attention: (process name).
+    Finished(String),
 }
 
 pub struct TerminalPanel {
@@ -40,7 +108,10 @@ pub struct TerminalPanel {
     stack: gtk::Stack,
     terms: RefCell<Vec<Rc<Term>>>,
     active: Cell<usize>,
+    /// The panel's project is on screen and the window is focused.
+    visible: Cell<bool>,
     scale: f64,
+    on_event: RefCell<Option<Rc<dyn Fn(Event)>>>,
     me: RefCell<Weak<TerminalPanel>>,
 }
 
@@ -86,7 +157,9 @@ impl TerminalPanel {
             stack,
             terms: RefCell::new(Vec::new()),
             active: Cell::new(0),
+            visible: Cell::new(false),
             scale,
+            on_event: RefCell::new(None),
             me: RefCell::new(Weak::new()),
         });
         *panel.me.borrow_mut() = Rc::downgrade(&panel);
@@ -97,6 +170,17 @@ impl TerminalPanel {
             }
         });
         panel
+    }
+
+    pub fn set_on_event(&self, f: Rc<dyn Fn(Event)>) {
+        *self.on_event.borrow_mut() = Some(f);
+    }
+
+    fn emit(&self, e: Event) {
+        let f = self.on_event.borrow().clone();
+        if let Some(f) = f {
+            f(e);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -116,27 +200,54 @@ impl TerminalPanel {
         term.set_mouse_autohide(true);
         apply_colors(&term, theme);
 
-        let n = self.terms.borrow().len() + 1;
         let chip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         chip.add_css_class("term-tab");
+        let dot = gtk::Label::new(None);
+        dot.add_css_class("status-dot");
         let icon = gtk::Label::new(Some(codicon::TERMINAL));
         icon.add_css_class("codicon");
-        let name = shell().rsplit('/').next().unwrap_or("sh").to_string();
+        let shell_name = shell().rsplit('/').next().unwrap_or("sh").to_string();
+        let name = gtk::Label::new(Some(&shell_name));
+        let close = gtk::Label::new(Some(codicon::CLOSE));
+        close.add_css_class("codicon");
+        close.add_css_class("close");
+        close.set_tooltip_text(Some("Kill Terminal"));
         chip.append(&icon);
-        chip.append(&gtk::Label::new(Some(&format!("{n}: {name}"))));
+        chip.append(&name);
+        chip.append(&dot);
+        chip.append(&close);
         self.header_tabs.append(&chip);
         self.stack.add_child(&term);
 
-        let t = Rc::new(Term { term: term.clone(), chip: chip.clone(), shell_pid: Cell::new(0) });
+        let t = Rc::new(Term {
+            term: term.clone(),
+            chip: chip.clone(),
+            dot,
+            name,
+            shell_pid: Cell::new(0),
+            shell_name,
+            job: RefCell::new(None),
+            job_since: Cell::new(None),
+            job_checked: Cell::new(None),
+            state: Cell::new(State::Idle),
+            last_output: Cell::new(Instant::now()),
+            busy_since: Cell::new(None),
+            timer_armed: Cell::new(false),
+        });
         self.terms.borrow_mut().push(t.clone());
 
         let click = gtk::GestureClick::new();
         let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(&t));
-        click.connect_pressed(move |_, _, _, _| {
-            if let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) {
-                if let Some(i) = p.terms.borrow().iter().position(|x| Rc::ptr_eq(x, &t)) {
-                    p.activate(i);
-                }
+        let close_w = close.clone();
+        click.connect_pressed(move |_, _, x, y| {
+            let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) else { return };
+            let on_close = close_w.compute_point(&t.chip, &gtk::graphene::Point::new(0.0, 0.0)).is_some_and(|pt| {
+                x as f32 >= pt.x() && y as f32 >= 0.0
+            });
+            if on_close {
+                p.kill(&t);
+            } else if let Some(i) = p.index_of(&t) {
+                p.activate(i);
             }
         });
         chip.add_controller(click);
@@ -145,6 +256,26 @@ impl TerminalPanel {
         term.connect_child_exited(move |_, _| {
             if let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) {
                 p.remove(&t);
+            }
+        });
+        let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(&t));
+        term.connect_contents_changed(move |_| {
+            if let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) {
+                p.on_output(&t);
+            }
+        });
+        let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(&t));
+        term.connect_bell(move |_| {
+            if let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) {
+                if !p.is_seen(&t) {
+                    p.set_state(&t, State::Attention);
+                }
+            }
+        });
+        let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(&t));
+        term.connect_window_title_changed(move |term| {
+            if let (Some(_), Some(t)) = (me.upgrade(), wt.upgrade()) {
+                t.chip.set_tooltip_text(term.window_title().as_deref());
             }
         });
 
@@ -167,11 +298,160 @@ impl TerminalPanel {
                 Err(e) => eprintln!("vibey: failed to spawn shell: {e}"),
             },
         );
+        let n = self.terms.borrow().len();
         self.activate(n - 1);
     }
 
+    fn index_of(&self, t: &Rc<Term>) -> Option<usize> {
+        self.terms.borrow().iter().position(|x| Rc::ptr_eq(x, t))
+    }
+
+    // ---- status ----
+
+    fn on_output(&self, t: &Rc<Term>) {
+        let now = Instant::now();
+        t.last_output.set(now);
+        if t.busy_since.get().is_none() {
+            t.busy_since.set(Some(now));
+        }
+        if t.job_checked.get().is_none_or(|c| now - c >= JOB_CHECK) {
+            self.update_job(t);
+        }
+        if t.state.get() != State::Running {
+            self.set_state(t, State::Running);
+        }
+        if !t.timer_armed.replace(true) {
+            self.arm_quiet_timer(t, QUIET);
+        }
+    }
+
+    fn arm_quiet_timer(&self, t: &Rc<Term>, after: Duration) {
+        let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(t));
+        glib::timeout_add_local_once(after, move || {
+            let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) else { return };
+            let quiet_for = t.last_output.get().elapsed();
+            if quiet_for < QUIET {
+                p.arm_quiet_timer(&t, QUIET - quiet_for);
+                return;
+            }
+            t.timer_armed.set(false);
+            let busy = t.busy_since.take().map_or(Duration::ZERO, |b| t.last_output.get() - b);
+            p.update_job(&t);
+            let next = if busy >= SUSTAINED && !p.is_seen(&t) { State::Attention } else { State::Idle };
+            if t.state.get() != State::Attention {
+                p.set_state(&t, next);
+            }
+        });
+    }
+
+    /// Refresh the foreground job (tab name); a long job ending unseen needs attention.
+    fn update_job(&self, t: &Rc<Term>) {
+        t.job_checked.set(Some(Instant::now()));
+        let job = t.foreground_pgid().and_then(process_name);
+        if *t.job.borrow() == job {
+            return;
+        }
+        let ended_long_job = job.is_none()
+            && t.job_since.get().is_some_and(|s| s.elapsed() >= SUSTAINED)
+            && !self.is_seen(t);
+        t.job_since.set(job.as_ref().map(|_| Instant::now()));
+        *t.job.borrow_mut() = job;
+        t.name.set_text(&t.label());
+        if ended_long_job {
+            self.set_state(t, State::Attention);
+        }
+        self.emit(Event::Changed);
+    }
+
+    fn set_state(&self, t: &Rc<Term>, state: State) {
+        let prev = t.state.replace(state);
+        for c in ["running", "attention"] {
+            t.chip.remove_css_class(c);
+        }
+        match state {
+            State::Running => t.chip.add_css_class("running"),
+            State::Attention => t.chip.add_css_class("attention"),
+            State::Idle => {}
+        }
+        t.dot.set_text(match state {
+            State::Idle => "",
+            _ => codicon::CIRCLE_FILLED,
+        });
+        if state == State::Attention && prev != State::Attention {
+            self.emit(Event::Finished(t.label()));
+        } else if state != prev {
+            self.emit(Event::Changed);
+        }
+    }
+
+    fn is_seen(&self, t: &Rc<Term>) -> bool {
+        self.visible.get() && self.terms.borrow().get(self.active.get()).is_some_and(|a| Rc::ptr_eq(a, t))
+    }
+
+    /// The window tells the panel whether its project is on screen and focused; the shown
+    /// terminal's attention clears once seen.
+    pub fn set_visible(&self, visible: bool) {
+        self.visible.set(visible);
+        self.clear_seen();
+    }
+
+    fn clear_seen(&self) {
+        let active = self.terms.borrow().get(self.active.get()).cloned();
+        if let Some(t) = active {
+            if self.is_seen(&t) && t.state.get() == State::Attention {
+                self.set_state(&t, State::Idle);
+            }
+        }
+    }
+
+    /// (any running, any needing attention, label of the first attention terminal)
+    pub fn summary(&self) -> (bool, bool, Option<String>) {
+        let terms = self.terms.borrow();
+        let running = terms.iter().any(|t| t.state.get() == State::Running);
+        let attention = terms.iter().find(|t| t.state.get() == State::Attention).map(|t| t.label());
+        (running, attention.is_some(), attention)
+    }
+
+    // ---- tabs ----
+
+    fn kill(&self, t: &Rc<Term>) {
+        let job = t.foreground_pgid().and_then(process_name);
+        let do_kill = {
+            let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(t));
+            move || {
+                if let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) {
+                    let pid = t.shell_pid.get();
+                    if pid > 0 {
+                        // The shell forwards SIGHUP to its jobs, like closing a terminal window.
+                        unsafe { libc::kill(pid, libc::SIGHUP) };
+                    }
+                    p.remove(&t);
+                }
+            }
+        };
+        match job {
+            None => do_kill(),
+            Some(job) => {
+                let dialog = gtk::AlertDialog::builder()
+                    .message(format!("Kill terminal running {job}?"))
+                    .detail("The process will be stopped.")
+                    .buttons(["Cancel", "Kill Terminal"])
+                    .cancel_button(0)
+                    .default_button(0)
+                    .modal(true)
+                    .build();
+                let root = self.widget.root().and_downcast::<gtk::Window>();
+                dialog.choose(root.as_ref(), None::<&gio::Cancellable>, move |res| {
+                    if res == Ok(1) {
+                        do_kill();
+                    }
+                });
+            }
+        }
+    }
+
     fn remove(&self, t: &Rc<Term>) {
-        let Some(i) = self.terms.borrow().iter().position(|x| Rc::ptr_eq(x, t)) else { return };
+        let Some(i) = self.index_of(t) else { return };
         self.terms.borrow_mut().remove(i);
         self.header_tabs.remove(&t.chip);
         self.stack.remove(&t.term);
@@ -181,26 +461,39 @@ impl TerminalPanel {
         } else {
             self.activate(i.min(n - 1));
         }
+        self.emit(Event::Changed);
     }
 
     fn activate(&self, i: usize) {
-        let terms = self.terms.borrow();
-        let Some(t) = terms.get(i) else { return };
-        for (j, x) in terms.iter().enumerate() {
-            if j == i {
-                x.chip.add_css_class("active");
-            } else {
-                x.chip.remove_css_class("active");
+        let t = {
+            let terms = self.terms.borrow();
+            let Some(t) = terms.get(i).cloned() else { return };
+            for (j, x) in terms.iter().enumerate() {
+                if j == i {
+                    x.chip.add_css_class("active");
+                } else {
+                    x.chip.remove_css_class("active");
+                }
             }
-        }
+            t
+        };
         self.active.set(i);
         self.stack.set_visible_child(&t.term);
         t.term.grab_focus();
+        self.clear_seen();
+    }
+
+    /// Send input to the shown terminal as if typed (self-test).
+    pub fn feed(&self, text: &str) {
+        let t = self.terms.borrow().get(self.active.get()).cloned();
+        if let Some(t) = t {
+            t.term.feed_child(text.as_bytes());
+        }
     }
 
     pub fn focus(&self) {
-        let terms = self.terms.borrow();
-        if let Some(t) = terms.get(self.active.get()) {
+        let t = self.terms.borrow().get(self.active.get()).cloned();
+        if let Some(t) = t {
             t.term.grab_focus();
         }
     }
@@ -213,7 +506,7 @@ impl TerminalPanel {
 
     /// Foreground jobs (other than the shell) running in this panel's terminals.
     pub fn running_jobs(&self) -> Vec<String> {
-        self.terms.borrow().iter().filter_map(|t| t.foreground_job()).collect()
+        self.terms.borrow().iter().filter_map(|t| t.foreground_pgid().and_then(process_name)).collect()
     }
 }
 
@@ -223,4 +516,16 @@ fn apply_colors(term: &vte4::Terminal, theme: &ThemeModel) {
     let refs: Vec<&gtk::gdk::RGBA> = palette.iter().collect();
     term.set_colors(Some(&fg.gdk()), Some(&bg.gdk()), &refs);
     term.set_color_cursor(Some(&theme.get("terminalCursor.foreground").gdk()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_own_process() {
+        let me = std::process::id() as i32;
+        let name = process_name(me).unwrap();
+        assert!(!name.is_empty() && !name.contains('/'));
+    }
 }
