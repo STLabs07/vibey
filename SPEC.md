@@ -3,6 +3,20 @@
 This is the original brief with corrections from inspecting the target machine.
 Changes from the brief are marked **[rev]**.
 
+## Decisions log
+- 2026-10-11, **license**: MIT ("open source, free forever").
+- 2026-10-11, **search is in scope (read-only)**: Ctrl+P fuzzy file finder over the whole
+  project, including git-ignored files on request. This fixes the VS Code weak spot the user named.
+  Ctrl+F find-in-file. Still no replace.
+- 2026-10-11, **themes**: the VS Code dark look stays the default (Dark 2026), with more options available:
+  VS Code's built-ins, 60+ community themes and user JSON, through a live-preview picker.
+- 2026-10-11, **highlighter: syntect → irosashi** (MIT). It runs VS Code's actual TextMate
+  grammars with vscode-textmate semantics, so token colors match VS Code. It's also faster
+  and needs no C regex build. Approved as "do what you think is best".
+- 2026-10-11, **file watching: notify → GIO file monitors**, which are already in-process via GTK. One less
+  dependency and no extra thread. Approved.
+- 2026-10-11, **renderer**: GPU by default; `renderer = "software"` in config.toml saves ≈25 MB.
+
 ## What this is
 A very lightweight, Linux-only, READ-ONLY "VS Code-shaped" window for people who code
 entirely through terminal AI CLIs (Claude Code, GPT CLIs, etc.). The AI edits the files;
@@ -14,18 +28,18 @@ fraction of the weight, with better multi-project / multi-terminal awareness.
 ## Hard scope
 IN: file tree, read-only syntax-highlighted code view with tabs, embedded terminals,
 multiple projects in one window, live file reload, git status display, resource monitoring,
-`vibey .` launcher.
+`vibey .` launcher, file finder (Ctrl+P), find in file (Ctrl+F), theme picker.
 
 OUT, permanently: editing, extensions/plugins, debugger, LSP, IntelliSense, search-and-replace.
 
 **[rev] Allowed, because they don't edit anything:** selecting and copying text in the code view,
-"Copy path" and "Copy relative path" in the tree. **Not decided yet:** find-in-file (Ctrl+F, no
-replace), and "Open in $EDITOR". Ask before adding either.
+"Copy path" and "Copy relative path" in the tree, file finder, find in file. **Not decided yet:**
+project-wide text search (Ctrl+Shift+F, read-only), "Open in $EDITOR". Ask before adding either.
 
 ## Stack (decided)
 - Rust + GTK4 (gtk4-rs), plain GTK4 with custom CSS, no libadwaita.
 - Terminals: VTE GTK4 build (`vte4` crate) on a real PTY.
-- Highlighting: `syntect` + a VS Code theme JSON → syntect theme + GTK CSS converter.
+- Highlighting: ~~`syntect`~~ **irosashi** (see the decisions log) + a VS Code theme JSON → GTK CSS converter.
   - **[rev] Default theme is "Dark 2026".** That is VS Code 1.141's actual default, and it's what
     a default VS Code install shows, since `settings.json` sets no theme. Dark Modern and Dark+
     ship too. All three are an `include` chain
@@ -39,7 +53,7 @@ replace), and "Open in $EDITOR". Ask before adding either.
     very close but not pixel-identical, especially in TS/Python.
 - **[rev] File icons:** VS Code's default icon theme is Seti, a font plus a JSON mapping (MIT).
   Bundle it and register the font through fontconfig, so no extra crate is needed.
-- File watching: `notify` (inotify).
+- File watching: ~~`notify`~~ **GIO file monitors** (inotify), see the decisions log.
 - Git: shell out to system `git`, debounced, off the UI thread, no libgit2.
   - **[rev] Always run with `GIT_OPTIONAL_LOCKS=0` (`--no-optional-locks`).** A background
     `git status` otherwise briefly takes `.git/index.lock`, and the AI CLI's own `git commit`
@@ -112,5 +126,5 @@ the environment (`SSH_AUTH_SOCK` etc.). v1.5 GitHub sign-in is out of scope for 
 4. Phases 1–5, checking in after each and reporting memory each time. Fix regressions before moving on.
 5. Small commits and a README.
 
-Name: Vibey. Binary: `vibey`. License: **ask the user**. Bundled VS Code themes and the Seti
+Name: Vibey. Binary: `vibey`. License: **MIT**. Bundled VS Code themes and the Seti
 font are MIT, and their notices must ship in `third_party/`.

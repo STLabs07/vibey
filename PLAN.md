@@ -23,56 +23,61 @@ data (no GObjects) and hand it back with `glib::MainContext::spawn_local` future
               │           GitState, Status                                │
               └──▲──────────────▲──────────────▲──────────────▲───────────┘
                  │ results      │ events       │ results      │ samples
-       gio::spawn_blocking  notify thread   git worker     proc sampler
-       (file read +         (inotify, non-  (1 thread,     (glib timeout →
-        syntect highlight)   recursive)     debounced,     spawn_blocking,
+       gio::spawn_blocking  GIO monitors    git worker     proc sampler
+       (file read + diff +  (inotify, only  (1 thread,     (glib timeout →
+        irosashi highlight)  open/expanded) debounced,     spawn_blocking,
                                             GIT_OPTIONAL_  only when visible)
                                             LOCKS=0)
 ```
 
-- **Highlighting**: the file is read and highlighted in `spawn_blocking`. The result is a list of
-  `(line, byte_range, style_id)` that the UI thread turns into shared `GtkTextTag`s, in idle
-  chunks with the visible region first. The SyntaxSet loads once, lazily, off-thread
-  (`OnceLock`), so startup never waits for it.
+- **Highlighting**: the file is read, diffed against the shown text and highlighted (irosashi,
+  VS Code grammars) in `spawn_blocking`. The result is a list of `(line, byte_range, style_id)`
+  that the UI thread turns into shared `GtkTextTag`s, 50k spans per idle chunk. The highlighter
+  initializes once, lazily, off-thread (`OnceLock`).
+- **Live reload**: GIO file monitor per open file → 60 ms debounce → Myers line diff off-thread →
+  in-place buffer edits (scroll position kept) → changed lines flash, then fade over 1.5 s.
 - **Code view**: `GtkTextView` (read-only, selectable) plus a custom gutter widget for line numbers
   and git bars. Line height is matched to VS Code's (`round(14×1.35)=19px` × UI scale).
 - **Tree**: `GtkListView` + `GtkTreeListModel`, which is virtualized: only visible rows exist and
   directories are read on expand.
 - **Terminals**: `vte4::Terminal`. State comes from `tcgetpgrp(pty)` vs the shell pid, plus
   contents-changed, bell and child-exited.
-- **Theme**: VS Code JSON (JSONC, `include` chain) → `ThemeModel` → syntect `Theme`, GTK CSS
-  (`@define-color` + generated sheet scaled by UI scale) and the VTE palette.
+- **Theme**: VS Code JSON (JSONC, `include` chain) or irosashi's bundled themes → `ThemeModel` →
+  GTK CSS (`@define-color` + sheet scaled by UI scale), VTE palette, and irosashi token rules.
+  Duplicate selectors are merged so the later rule wins, as in vscode-textmate.
 - **Single instance**: `GtkApplication` + `HANDLES_COMMAND_LINE` over D-Bus.
 
 ## Module layout
 ```
 src/
-  main.rs          app setup, CLI (--measure-startup)
-  theme.rs         VS Code theme loader → syntect theme, CSS, terminal palette
-  highlight.rs     lazy SyntaxSet, background highlighting
-  codeview.rs      read-only text view, gutter (line numbers, git bars)
-  tree.rs          file tree (TreeListModel), Seti icons
-  icons.rs         Seti font registration + filename→glyph mapping
-  terminal.rs      VTE wrapper, naming, status        (phase 2)
-  project.rs       per-project state, rail            (phase 1)
-  fswatch.rs       notify integration                 (phase 1)
-  git.rs           git worker, porcelain v2 parser    (phase 3)
-  procmon.rs       /proc sampling, PSS                (phase 4)
-  session.rs       config.toml / session.json         (phase 5)
-assets/            bundled themes (Dark 2026 chain), seti.woff + mapping
-third_party/       MIT notices for VS Code themes / Seti
-scripts/measure.sh memory + startup measurement
+  main.rs          CLI, config, renderer choice, startup measurement
+  app.rs           window: rail, project pages, status bar, shortcuts, themes, close guard
+  project.rs       per-project state (explorer, editor group, terminals), file index, Ctrl+P provider
+  editor.rs        tab strip (preview semantics), breadcrumb, find widget, empty watermark
+  codeview.rs      read-only text view, gutter, live reload + diff + change flash, find
+  highlight.rs     irosashi wrapper, bracket pair colorization, language names
+  theme.rs         theme catalog/model, VS Code defaults, CSS + terminal colors
+  quickopen.rs     VS Code-style quick pick (files, themes)
+  fuzzy.rs         fzf-style path scorer
+  tree.rs          file tree (TreeListModel + GtkDirectoryList)
+  terminal.rs      terminal panel (VTE), foreground-job detection
+  icons.rs         Seti + Codicon fonts and lookups
+  config.rs        ~/.config/vibey/config.toml
+  selftest.rs      scripted headless test harness (VIBEY_SELFTEST)
+  git.rs           (phase 3)   procmon.rs (phase 4)   session.rs (phase 5)
+assets/            VS Code themes, Seti + Codicon fonts, style.css
+third_party/       license notices
+scripts/           measure.sh, headless.sh, woff2ttf.py
 ```
 
 ## Dependencies (kept minimal)
 | Crate | Why |
 |---|---|
 | gtk4, vte4 | the stack |
-| syntect (no default features; `parsing`, `dump-load`, `regex-onig`) | highlighting |
-| two-face (syntaxes only) | TS/TSX/TOML/Dockerfile/… grammars syntect lacks |
-| serde_json | theme JSON |
-| libc | tcgetpgrp, clock_gettime, kill |
-| notify (phase 1), toml + serde (phase 5) | watching, config |
+| irosashi | VS Code TextMate grammars + tokenizer (pure Rust, MIT) |
+| similar | line diff for live-reload change highlighting (no deps) |
+| serde, serde_json, toml | theme JSON, config |
+| libc | tcgetpgrp, clock_gettime |
 
 ## Phase 0 spike (what's being measured)
 A window built in the final layout shape: activity rail, Seti-iconed tree, a tab with breadcrumb,
@@ -104,10 +109,8 @@ Matching: theme colors, layout geometry (row heights, tab/breadcrumb/panel/statu
 line pitch 21 px vs 20.8 px), Seti file icons, Codicon chevrons, bracket pair colorization,
 terminal palette and font.
 Differences:
-1. **Token colors in some languages.** Sublime grammars (syntect) scope fewer things than VS Code's
-   TextMate grammars. Example: in Rust, VS Code colors `HashMap`, `Arc` and `u64` teal, while ours
-   stay default or blue. Fix option: swap syntect for `irosashi` (MIT, claims byte-identical output
-   to vscode-textmate) or `giallo` (EUPL-1.2). Needs approval because syntect is a decided stack item.
+1. ~~**Token colors in some languages.**~~ Fixed in phase 1 by switching to irosashi. Token colors now
+   match pixels sampled from VS Code (`highlight::tests::matches_vscode_dark_2026`).
 2. **Text rendering.** GTK 4.14 rounds glyph advances to whole pixels, so code text is ~2% narrower
    and slightly lighter than Chromium's. GTK 4.16+ adds `gtk-font-rendering` to fix this; Mint 22
    ships 4.14.
@@ -122,3 +125,22 @@ Differences:
   drop the `notify` crate. That means one less dependency and no extra thread. Needs approval
   (stack change).
 - `TreeListRow::is_expandable()` must not be used: it creates (lists + monitors) collapsed folders' models.
+
+## Phase 1 results (2026-10-11)
+
+Done: project rail (avatars, Ctrl+1..9, add/close), per-project explorer, tabs with preview
+semantics, live reload with change flash, Ctrl+P file finder, Ctrl+F find, theme picker
+(66 themes, live preview), config.toml, close guard for running jobs.
+
+Verified headlessly (`scripts/headless.sh`, Broadway backend, PNG snapshots). Nothing ran on the
+user's desktop: quick open on a 737-file repo, find (124 matches), live reload (3 changed lines
+flash, then fade), theme preview + Escape revert, project switching from inside a terminal.
+
+**Memory on the GPU renderer is not re-measured yet.** That needs a visible window on the real
+display. The headless (software) run is 34–40 MB PSS with 3 projects open.
+
+Known gaps carried forward: the tree doesn't auto-reveal the active file yet. Files over 4 MB show
+without highlighting, and files over 8 MB show a notice.
+
+irosashi upstream bug to report: with two rules for the same selector, the first wins
+(vscode-textmate: the last wins). Worked around in `theme::dedupe_rules`.
