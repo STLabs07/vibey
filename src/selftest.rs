@@ -74,6 +74,7 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
         }
         "project" => app.activate(arg.parse::<usize>().unwrap_or(1).saturating_sub(1)),
         "theme" => app.apply_theme(arg, false),
+        "hover" => app.hover_rail(arg.parse().unwrap_or(1)),
         "exec" => {
             let ok = std::process::Command::new("sh").args(["-c", arg]).status().is_ok_and(|s| s.success());
             eprintln!("selftest: exec ok={ok}");

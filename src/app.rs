@@ -107,6 +107,7 @@ fn rail_button(glyph: &str, tooltip: &str) -> gtk::Button {
     b.add_css_class("codicon");
     b.set_tooltip_text(Some(tooltip));
     b.set_focus_on_click(false);
+    b.set_cursor_from_name(Some("pointer"));
     b
 }
 
@@ -172,6 +173,12 @@ impl App {
         let rail_projects = gtk::Box::new(gtk::Orientation::Vertical, 0);
         rail.append(&rail_projects);
         let add = rail_button(codicon::ADD, "Open Folder as Project…");
+        add.add_css_class("add");
+        if let Some(c) = add.child() {
+            // Keep the dashed slot square instead of stretching to the rail width.
+            c.set_halign(gtk::Align::Center);
+            c.set_valign(gtk::Align::Center);
+        }
         rail.append(&add);
         let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
         spacer.set_vexpand(true);
@@ -180,6 +187,7 @@ impl App {
         let gear_icon = label(codicon::SETTINGS_GEAR, "codicon");
         gear.set_child(Some(&gear_icon));
         gear.add_css_class("rail-menu");
+        gear.set_cursor_from_name(Some("pointer"));
         rail.append(&gear);
 
         let stack = gtk::Stack::new();
@@ -409,6 +417,7 @@ impl App {
         let item = gtk::Box::new(gtk::Orientation::Vertical, 0);
         item.add_css_class("project");
         item.set_tooltip_text(Some(&format!("{}\n{}", project.name, root.display())));
+        item.set_cursor_from_name(Some("pointer"));
         let avatar = label(&initials(&project.name), "avatar");
         let hash = project.name.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
         avatar.add_css_class(&format!("c{}", hash % AVATAR_COLORS));
@@ -439,6 +448,8 @@ impl App {
         let weak_p = Rc::downgrade(&project);
         let it = item.clone();
         click.connect_pressed(move |g, _, x, y| {
+            // A Box has no :active state of its own; set it for the press feedback.
+            it.set_state_flags(gtk::StateFlags::ACTIVE, false);
             let (Some(a), Some(p)) = (me.upgrade(), weak_p.upgrade()) else { return };
             let Some(i) = a.index_of(&p) else { return };
             if g.current_button() == 3 {
@@ -447,6 +458,10 @@ impl App {
                 a.activate(i);
             }
         });
+        let it = item.clone();
+        click.connect_released(move |_, _, _, _| it.unset_state_flags(gtk::StateFlags::ACTIVE));
+        let it = item.clone();
+        click.connect_stopped(move |_| it.unset_state_flags(gtk::StateFlags::ACTIVE));
         item.add_controller(click);
         self.rail_projects.append(&item);
         self.projects.borrow_mut().push((project.clone(), item));
@@ -843,6 +858,17 @@ impl App {
         if let Some(p) = self.active_project() {
             let hl = current_theme().get("list.highlightForeground").hex();
             FileProvider::open(p, &self.quick, hl, gtk::prelude::GtkWindowExt::focus(&self.window));
+        }
+    }
+
+    /// Self-test: show rail item `i` (1-based; 0 = the "+" button) as hovered.
+    pub fn hover_rail(&self, i: usize) {
+        let w: Option<gtk::Widget> = match i {
+            0 => self.rail_projects.next_sibling(),
+            i => self.projects.borrow().get(i - 1).map(|(_, b)| b.clone().upcast()),
+        };
+        if let Some(w) = w {
+            w.set_state_flags(gtk::StateFlags::PRELIGHT, false);
         }
     }
 

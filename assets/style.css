@@ -19,18 +19,31 @@ window.vibey label { color: inherit; }
 .rail .project {
   min-width: {{56}};
   color: @vs_activityBar_inactiveForeground;
-  border-left: {{2}} solid transparent;
+  border-left: {{3}} solid transparent;
+  transition: background-color 120ms ease-out, border-color 120ms ease-out;
 }
-.rail .project.active { color: @vs_activityBar_foreground; border-left-color: @vs_activityBar_activeBorder; }
-.rail .project:hover .avatar { opacity: 0.9; }
+/* hover: row tint + faint side bar + ring; active: accent bar + accent ring; press: dim.
+   (No CSS transform: it breaks rendering with the cairo renderer.) */
+.rail .project:hover { background-color: alpha(@vs_activityBar_foreground, 0.07); border-left-color: alpha(@vs_activityBar_foreground, 0.4); }
+.rail .project.active { color: @vs_activityBar_foreground; background-color: alpha(@vs_activityBar_foreground, 0.1); border-left-color: @vs_activityBar_activeBorder; }
 .rail .avatar {
   min-width: {{38}}; min-height: {{38}};
   border-radius: {{9}};
   color: #ffffff;
   font-weight: 700; font-size: {{~15}};
-  opacity: 0.6;
+  opacity: 0.55;
+  box-shadow: 0 0 0 {{2}} transparent, 0 0 0 {{4}} transparent;
+  transition: opacity 120ms ease-out, box-shadow 120ms ease-out;
 }
-.rail .project.active .avatar { opacity: 1; }
+.rail .project:hover .avatar {
+  opacity: 1;
+  box-shadow: 0 0 0 {{2}} @vs_activityBar_background, 0 0 0 {{4}} alpha(@vs_activityBar_foreground, 0.5);
+}
+.rail .project.active .avatar {
+  opacity: 1;
+  box-shadow: 0 0 0 {{2}} @vs_activityBar_background, 0 0 0 {{4}} @vs_activityBar_activeBorder;
+}
+.rail .project:active .avatar { opacity: 0.75; transition-duration: 40ms; }
 .avatar.c0 { background-color: #3994BC; }
 .avatar.c1 { background-color: #8E65C9; }
 .avatar.c2 { background-color: #2E9E76; }
@@ -47,12 +60,31 @@ button.rail-button {
 }
 button.rail-button:hover { color: @vs_activityBar_foreground; }
 button.rail-button > label { font-family: "codicon"; font-size: {{~28}}; }
+/* "+": an outlined project-shaped slot that fills in on hover (solid: dashed borders
+   misrender with the cairo renderer) */
+button.rail-button.add > label {
+  min-width: {{38}}; min-height: {{38}};
+  border-radius: {{9}};
+  border: {{2}} solid alpha(@vs_activityBar_inactiveForeground, 0.35);
+  font-size: {{~22}};
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+}
+button.rail-button.add:hover > label {
+  border-color: @vs_focusBorder;
+  background-color: alpha(@vs_focusBorder, 0.22);
+  color: @vs_activityBar_foreground;
+}
+button.rail-button.add:active > label { background-color: alpha(@vs_focusBorder, 0.4); transition-duration: 40ms; }
 menubutton.rail-menu > button {
   background: none; border: none; box-shadow: none; outline: none;
   min-width: {{48}}; min-height: {{48}}; padding: 0;
+  margin: {{4}} {{5}};
+  border-radius: {{9}};
   color: @vs_activityBar_inactiveForeground;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
 }
-menubutton.rail-menu > button:hover { color: @vs_activityBar_foreground; }
+menubutton.rail-menu > button:hover { color: @vs_activityBar_foreground; background-color: alpha(@vs_activityBar_foreground, 0.1); }
+menubutton.rail-menu > button:checked { color: @vs_activityBar_foreground; background-color: alpha(@vs_activityBar_foreground, 0.16); }
 menubutton.rail-menu label.codicon { font-size: {{~28}}; }
 
 /* ---- sidebar / explorer ---- */
