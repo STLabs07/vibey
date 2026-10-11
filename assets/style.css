@@ -17,17 +17,43 @@ window.vibey label { color: inherit; }
   min-width: {{48}};
 }
 .rail .project {
-  min-width: {{48}}; min-height: {{48}};
+  min-width: {{46}}; min-height: {{48}};
   color: @vs_activityBar_inactiveForeground;
   border-left: {{2}} solid transparent;
 }
 .rail .project.active { color: @vs_activityBar_foreground; border-left-color: @vs_activityBar_activeBorder; }
+.rail .project:hover .avatar { opacity: 0.9; }
 .rail .avatar {
-  min-width: {{26}}; min-height: {{26}};
+  min-width: {{28}}; min-height: {{28}};
   border-radius: {{6}};
-  background-color: alpha(@vs_activityBar_foreground, 0.12);
-  font-weight: 600; font-size: {{~13}};
+  color: #ffffff;
+  font-weight: 700; font-size: {{~12}};
+  opacity: 0.6;
 }
+.rail .project.active .avatar { opacity: 1; }
+.avatar.c0 { background-color: #3994BC; }
+.avatar.c1 { background-color: #8E65C9; }
+.avatar.c2 { background-color: #2E9E76; }
+.avatar.c3 { background-color: #C26C2B; }
+.avatar.c4 { background-color: #B5485D; }
+.avatar.c5 { background-color: #A88A1F; }
+.avatar.c6 { background-color: #4A6FC4; }
+.avatar.c7 { background-color: #2F8F8F; }
+button.rail-button {
+  min-width: {{48}}; min-height: {{48}};
+  padding: 0;
+  font-size: {{~24}};
+  color: @vs_activityBar_inactiveForeground;
+}
+button.rail-button:hover { color: @vs_activityBar_foreground; }
+button.rail-button > label { font-family: "codicon"; font-size: {{~24}}; }
+menubutton.rail-menu > button {
+  background: none; border: none; box-shadow: none; outline: none;
+  min-width: {{48}}; min-height: {{48}}; padding: 0;
+  color: @vs_activityBar_inactiveForeground;
+}
+menubutton.rail-menu > button:hover { color: @vs_activityBar_foreground; }
+menubutton.rail-menu label.codicon { font-size: {{~24}}; }
 
 /* ---- sidebar / explorer ---- */
 .sidebar {
@@ -70,7 +96,8 @@ label.seti {
   font-family: "seti";
   font-size: {{~22}};
   min-width: {{16}};
-  margin: {{-5}} {{6}} {{-5}} 0; /* the large glyph must not grow the 22px row */
+  margin-right: {{6}};
+  line-height: 0.8; /* the large glyph must not grow the 22px row */
 }
 
 /* ---- editor tabs / breadcrumb ---- */
@@ -92,7 +119,11 @@ label.seti {
   box-shadow: inset 0 1px 0 0 @vs_tab_activeBorderTop;
   margin-bottom: -1px;
 }
-.tab .close { min-width: {{28}}; font-size: {{~14}}; opacity: 0.85; }
+.tab:hover { background-color: @vs_tab_hoverBackground; }
+.tab .close { min-width: {{28}}; font-size: {{~14}}; opacity: 0; }
+.tab.active .close, .tab:hover .close { opacity: 0.85; }
+.tab.preview .tab-label { font-style: italic; }
+.tab.deleted .tab-label { text-decoration: line-through; color: @vs_gitDecoration_deletedResourceForeground; }
 .breadcrumb {
   min-height: {{22}};
   padding-left: {{14}};
@@ -103,6 +134,7 @@ label.seti {
 .breadcrumb label.seti { font-size: {{~18}}; margin-right: {{2}}; }
 
 /* ---- code ---- */
+.editor-area { background-color: @vs_editor_background; }
 textview.code, textview.code text, gutter {
   font-family: "Droid Sans Mono", monospace;
   font-size: {{~14}};
@@ -128,6 +160,7 @@ gutter { background-color: @vs_editor_background; }
 }
 .panel-tab.active { color: @vs_panelTitle_activeForeground; background-color: @vs_list_inactiveSelectionBackground; }
 .term-tab { padding: 0 {{8}}; color: @vs_panelTitle_inactiveForeground; }
+.term-tab label.codicon { margin-right: {{4}}; }
 .term-tab.active { color: @vs_panelTitle_activeForeground; }
 vte-terminal { padding: 0 {{20}}; background-color: @vs_terminal_background; }
 
@@ -140,6 +173,93 @@ vte-terminal { padding: 0 {{20}}; background-color: @vs_terminal_background; }
   border-top: 1px solid @vs_statusBar_border;
 }
 .statusbar label { padding: 0 {{5}}; margin: 0 {{2}}; }
+
+/* ---- find widget (VS Code's editor find) ---- */
+.find-widget {
+  margin-right: {{14}};
+  padding: {{4}} {{4}} {{4}} {{8}};
+  background-color: @vs_editorWidget_background;
+  border: 1px solid @vs_editorWidget_border;
+  border-top: none;
+  border-radius: 0 0 {{4}} {{4}};
+  box-shadow: 0 0 {{8}} 0 @vs_widget_shadow;
+}
+.find-widget entry { min-height: {{24}}; margin-right: {{4}}; }
+.find-count { margin: 0 {{6}}; min-width: {{70}}; font-size: {{~12}}; }
+
+/* ---- inputs & buttons ---- */
+window.vibey entry {
+  background-color: @vs_input_background;
+  color: @vs_input_foreground;
+  border: 1px solid @vs_input_border;
+  border-radius: {{2}};
+  box-shadow: none;
+  outline: none;
+  padding: 0 {{6}};
+}
+window.vibey entry:focus-within { border-color: @vs_focusBorder; }
+button.icon-button, button.rail-button, window.vibey button.flat {
+  background: none;
+  border: none;
+  box-shadow: none;
+  min-height: 0;
+  outline: none;
+  color: inherit;
+}
+button.icon-button { min-width: {{22}}; min-height: {{22}}; padding: 0 {{2}}; border-radius: {{4}}; }
+button.icon-button > label { font-family: "codicon"; font-size: {{~16}}; }
+button.icon-button:hover, window.vibey button.flat:hover { background-color: @vs_list_hoverBackground; }
+button.icon-button:checked {
+  background-color: @vs_inputOption_activeBackground;
+  box-shadow: inset 0 0 0 1px @vs_inputOption_activeBorder;
+}
+button.primary {
+  background: @vs_button_background;
+  color: @vs_button_foreground;
+  border: none; box-shadow: none;
+  border-radius: {{2}};
+  padding: {{4}} {{14}};
+}
+popover > contents {
+  background-color: @vs_quickInput_background;
+  color: @vs_quickInput_foreground;
+  border: 1px solid @vs_editorWidget_border;
+  box-shadow: 0 0 {{8}} 0 @vs_widget_shadow;
+  padding: {{4}};
+}
+popover > arrow { background: none; border: none; }
+popover checkbutton { padding: {{2}} {{6}}; }
+.dim { color: @vs_descriptionForeground; font-size: {{~12}}; padding: {{4}} {{6}}; }
+
+/* ---- empty editor watermark ---- */
+.watermark { color: @vs_descriptionForeground; }
+.watermark .what { margin-right: {{10}}; padding: {{4}} 0; }
+.watermark .keys { padding: {{4}} 0; opacity: 0.9; }
+
+/* ---- quick pick ---- */
+.scrim { background: transparent; }
+.quick-input {
+  margin-top: {{8}};
+  padding: {{6}};
+  background-color: @vs_quickInput_background;
+  color: @vs_quickInput_foreground;
+  border-radius: {{6}};
+  box-shadow: 0 0 {{8}} 0 @vs_widget_shadow;
+}
+.quick-input entry.quick-entry { min-height: {{26}}; margin-bottom: {{6}}; }
+.quick-list { background: transparent; }
+.quick-list > row { padding: 0; border-radius: {{3}}; outline: none; }
+.quick-list > row:hover { background-color: @vs_list_hoverBackground; }
+.quick-list > row:selected {
+  background-color: @vs_quickInputList_focusBackground;
+  color: @vs_quickInputList_focusForeground;
+}
+.quick-row { min-height: {{22}}; padding: 0 {{6}}; }
+.quick-row label.seti { margin-right: {{4}}; }
+.quick-label { margin-right: {{8}}; }
+.quick-detail { color: @vs_descriptionForeground; font-size: {{~12}}; }
+.quick-group { color: @vs_descriptionForeground; font-size: {{~12}}; margin-left: {{8}}; }
+.quick-footer { color: @vs_descriptionForeground; font-size: {{~11}}; padding: {{6}} {{6}} {{0}}; }
 
 /* ---- chrome ---- */
 paned > separator {

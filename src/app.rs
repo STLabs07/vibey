@@ -1,0 +1,765 @@
+//! The window: project rail, project pages, status bar, quick pick, shortcuts, themes.
+
+use std::cell::{Cell, RefCell};
+use std::path::Path;
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use std::time::Duration;
+
+use gtk::prelude::*;
+use gtk::{gio, glib};
+
+use crate::codeview::{SharedStyle, ViewStyle};
+use crate::config::{self, Config};
+use crate::editor::Status;
+use crate::icons::codicon;
+use crate::project::{FileProvider, Project};
+use crate::quickopen::{self, Item, Provider, QuickPick};
+use crate::theme::{self, Kind, ThemeModel};
+
+thread_local! {
+    static THEME: RefCell<Option<Rc<ThemeModel>>> = const { RefCell::new(None) };
+}
+
+/// The theme currently applied (UI thread only).
+pub fn current_theme() -> Rc<ThemeModel> {
+    THEME.with(|t| t.borrow().clone()).expect("theme applied at startup")
+}
+
+const AVATAR_COLORS: usize = 8;
+
+pub struct App {
+    pub window: gtk::ApplicationWindow,
+    rail_projects: gtk::Box,
+    stack: gtk::Stack,
+    status_project: gtk::Label,
+    status_branch: gtk::Label,
+    status_right: gtk::Box,
+    status_pos: gtk::Label,
+    status_indent: gtk::Label,
+    status_eol: gtk::Label,
+    status_lang: gtk::Label,
+    projects: RefCell<Vec<(Rc<Project>, gtk::Box)>>,
+    active: Cell<Option<usize>>,
+    style: SharedStyle,
+    css: gtk::CssProvider,
+    config: RefCell<Config>,
+    quick: Rc<QuickPick>,
+    scale: f64,
+    chord: Cell<bool>,
+    allow_close: Cell<bool>,
+    me: RefCell<Weak<App>>,
+}
+
+fn ui_scale() -> f64 {
+    let dpi = gtk::Settings::default().map(|s| s.gtk_xft_dpi()).unwrap_or(-1);
+    if dpi > 0 { dpi as f64 / 1024.0 / 96.0 } else { 1.0 }
+}
+
+/// Expand `{{n}}` (rounded) and `{{~n}}` (fractional) placeholders to scaled px.
+fn scale_css(src: &str, scale: f64) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(i) = rest.find("{{") {
+        out.push_str(&rest[..i]);
+        let Some(j) = rest[i..].find("}}") else { break };
+        let inner = rest[i + 2..i + j].trim();
+        let (exact, num) = match inner.strip_prefix('~') {
+            Some(n) => (true, n),
+            None => (false, inner),
+        };
+        let px = num.parse::<f64>().unwrap_or(0.0) * scale;
+        out.push_str(&if exact { format!("{px:.2}px") } else { format!("{}px", px.round()) });
+        rest = &rest[i + j + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn label(text: &str, class: &str) -> gtk::Label {
+    let l = gtk::Label::new(Some(text));
+    if !class.is_empty() {
+        l.add_css_class(class);
+    }
+    l
+}
+
+fn rail_button(glyph: &str, tooltip: &str) -> gtk::Button {
+    let b = gtk::Button::with_label(glyph);
+    b.add_css_class("rail-button");
+    b.add_css_class("codicon");
+    b.set_tooltip_text(Some(tooltip));
+    b.set_focus_on_click(false);
+    b
+}
+
+fn initials(name: &str) -> String {
+    let words: Vec<&str> = name.split(|c: char| c == '-' || c == '_' || c == ' ' || c == '.').filter(|w| !w.is_empty()).collect();
+    let s: String = match words.as_slice() {
+        [a, b, ..] => a.chars().take(1).chain(b.chars().take(1)).collect(),
+        [a] => a.chars().take(1).collect(),
+        [] => "?".into(),
+    };
+    s.to_uppercase()
+}
+
+impl App {
+    pub fn new(app: &gtk::Application, cfg: Config) -> Rc<App> {
+        let scale = ui_scale();
+        let window = gtk::ApplicationWindow::builder()
+            .application(app)
+            .title("Vibey")
+            .default_width(1400)
+            .default_height(900)
+            .build();
+        window.add_css_class("vibey");
+
+        let css = gtk::CssProvider::new();
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().expect("display"),
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+
+        // Rail
+        let rail = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        rail.add_css_class("rail");
+        let rail_projects = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        rail.append(&rail_projects);
+        let add = rail_button(codicon::ADD, "Open Folder as Project…");
+        rail.append(&add);
+        let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        spacer.set_vexpand(true);
+        rail.append(&spacer);
+        let gear = gtk::MenuButton::builder().tooltip_text("Settings").build();
+        let gear_icon = label(codicon::SETTINGS_GEAR, "codicon");
+        gear.set_child(Some(&gear_icon));
+        gear.add_css_class("rail-menu");
+        rail.append(&gear);
+
+        let stack = gtk::Stack::new();
+        stack.set_hexpand(true);
+        stack.set_vexpand(true);
+        let welcome = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        welcome.add_css_class("watermark");
+        welcome.set_valign(gtk::Align::Center);
+        welcome.set_halign(gtk::Align::Center);
+        welcome.append(&label("No project open", "what"));
+        let open_btn = gtk::Button::with_label("Open Folder…");
+        open_btn.add_css_class("primary");
+        welcome.append(&open_btn);
+        stack.add_named(&welcome, Some("welcome"));
+
+        // Status bar
+        let status = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        status.add_css_class("statusbar");
+        let status_project = label("", "");
+        let status_branch = label("", "");
+        status.append(&status_project);
+        status.append(&status_branch);
+        let sp = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        sp.set_hexpand(true);
+        status.append(&sp);
+        let status_right = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let (status_pos, status_indent, status_eol, status_lang) = (label("", ""), label("", ""), label("", ""), label("", ""));
+        for l in [&status_pos, &status_indent, &label("UTF-8", ""), &status_eol, &status_lang] {
+            status_right.append(l);
+        }
+        status.append(&status_right);
+
+        let main = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        main.set_vexpand(true);
+        main.append(&rail);
+        main.append(&stack);
+        let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        outer.append(&main);
+        outer.append(&status);
+
+        let quick = QuickPick::new(scale);
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&outer));
+        overlay.add_overlay(&quick.widget);
+        window.set_child(Some(&overlay));
+
+        let style = Rc::new(RefCell::new(ViewStyle {
+            theme_id: String::new(),
+            brackets: Arc::new(crate::highlight::BracketColors { cycle: [(0, 0, 0, 0); 3], unexpected: (0, 0, 0, 0) }),
+            line_number: theme::Rgba { r: 0, g: 0, b: 0, a: 0 },
+            changed: theme::Rgba { r: 0, g: 0, b: 0, a: 0 },
+            find_match: theme::Rgba { r: 0, g: 0, b: 0, a: 0 },
+            find_current: theme::Rgba { r: 0, g: 0, b: 0, a: 0 },
+            scale,
+        }));
+
+        let app_rc = Rc::new(App {
+            window,
+            rail_projects,
+            stack,
+            status_project,
+            status_branch,
+            status_right,
+            status_pos,
+            status_indent,
+            status_eol,
+            status_lang,
+            projects: RefCell::new(Vec::new()),
+            active: Cell::new(None),
+            style,
+            css,
+            config: RefCell::new(cfg),
+            quick,
+            scale,
+            chord: Cell::new(false),
+            allow_close: Cell::new(false),
+            me: RefCell::new(Weak::new()),
+        });
+        *app_rc.me.borrow_mut() = Rc::downgrade(&app_rc);
+        let theme_id = app_rc.config.borrow().theme.clone();
+        app_rc.apply_theme(&theme_id, false);
+
+        let me = Rc::downgrade(&app_rc);
+        add.connect_clicked(move |_| {
+            if let Some(a) = me.upgrade() {
+                a.pick_folder();
+            }
+        });
+        let me = Rc::downgrade(&app_rc);
+        open_btn.connect_clicked(move |_| {
+            if let Some(a) = me.upgrade() {
+                a.pick_folder();
+            }
+        });
+        gear.set_popover(Some(&app_rc.settings_popover()));
+        app_rc.install_shortcuts();
+        app_rc.install_close_guard();
+        app_rc.update_status();
+        app_rc
+    }
+
+    fn settings_popover(self: &Rc<Self>) -> gtk::Popover {
+        let pop = gtk::Popover::new();
+        pop.set_position(gtk::PositionType::Right);
+        pop.add_css_class("menu-popover");
+        let b = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let theme_btn = gtk::Button::with_label("Color Theme…   Ctrl+K Ctrl+T");
+        theme_btn.add_css_class("flat");
+        let me = Rc::downgrade(self);
+        let p = pop.clone();
+        theme_btn.connect_clicked(move |_| {
+            p.popdown();
+            if let Some(a) = me.upgrade() {
+                a.open_theme_picker();
+            }
+        });
+        b.append(&theme_btn);
+        b.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        b.append(&label("Renderer (applies on restart)", "dim"));
+        let gpu = gtk::CheckButton::with_label("GPU (smoother)");
+        let sw = gtk::CheckButton::with_label("Software (≈25 MB less memory)");
+        sw.set_group(Some(&gpu));
+        if self.config.borrow().renderer == "software" { sw.set_active(true) } else { gpu.set_active(true) }
+        for (btn, value) in [(&gpu, "gpu"), (&sw, "software")] {
+            let me = Rc::downgrade(self);
+            btn.connect_toggled(move |b| {
+                if let (true, Some(a)) = (b.is_active(), me.upgrade()) {
+                    a.config.borrow_mut().renderer = value.into();
+                    config::save(&a.config.borrow());
+                }
+            });
+            b.append(btn);
+        }
+        pop.set_child(Some(&b));
+        pop
+    }
+
+    // ---- projects ----
+
+    pub fn add_project(self: &Rc<Self>, root: &Path) -> Option<Rc<Project>> {
+        let root = root.canonicalize().ok().filter(|p| p.is_dir())?;
+        if let Some(i) = self.projects.borrow().iter().position(|(p, _)| p.root == root) {
+            self.activate(i);
+            return Some(self.projects.borrow()[i].0.clone());
+        }
+        let project = Project::new(&root, self.style.clone(), self.scale);
+        let me = Rc::downgrade(self);
+        let weak_p = Rc::downgrade(&project);
+        project.editor.set_on_status(Rc::new(move |st| {
+            if let (Some(a), Some(p)) = (me.upgrade(), weak_p.upgrade()) {
+                if a.active_project().is_some_and(|ap| Rc::ptr_eq(&ap, &p)) {
+                    a.show_status(st);
+                }
+            }
+        }));
+        self.stack.add_child(&project.page);
+
+        let n = self.projects.borrow().len();
+        let item = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        item.add_css_class("project");
+        item.set_tooltip_text(Some(&format!("{}\n{}", project.name, root.display())));
+        let avatar = label(&initials(&project.name), "avatar");
+        let hash = project.name.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
+        avatar.add_css_class(&format!("c{}", hash % AVATAR_COLORS));
+        avatar.set_halign(gtk::Align::Center);
+        avatar.set_valign(gtk::Align::Center);
+        item.set_valign(gtk::Align::Start);
+        item.append(&avatar);
+        let click = gtk::GestureClick::new();
+        click.set_button(0);
+        let me = Rc::downgrade(self);
+        let weak_p = Rc::downgrade(&project);
+        let it = item.clone();
+        click.connect_pressed(move |g, _, x, y| {
+            let (Some(a), Some(p)) = (me.upgrade(), weak_p.upgrade()) else { return };
+            let Some(i) = a.index_of(&p) else { return };
+            if g.current_button() == 3 {
+                a.project_menu(i, &it, x, y);
+            } else {
+                a.activate(i);
+            }
+        });
+        item.add_controller(click);
+        self.rail_projects.append(&item);
+        self.projects.borrow_mut().push((project.clone(), item));
+        self.activate(n);
+        Some(project)
+    }
+
+    fn index_of(&self, p: &Rc<Project>) -> Option<usize> {
+        self.projects.borrow().iter().position(|(x, _)| Rc::ptr_eq(x, p))
+    }
+
+    pub fn active_project(&self) -> Option<Rc<Project>> {
+        self.active.get().and_then(|i| self.projects.borrow().get(i).map(|(p, _)| p.clone()))
+    }
+
+    pub fn activate(self: &Rc<Self>, i: usize) {
+        let Some((project, item)) = self.projects.borrow().get(i).cloned() else { return };
+        if let Some(prev) = self.active.get().and_then(|j| self.projects.borrow().get(j).map(|(_, it)| it.clone())) {
+            prev.remove_css_class("active");
+        }
+        item.add_css_class("active");
+        self.active.set(Some(i));
+        self.stack.set_visible_child(&project.page);
+        self.window.set_title(Some(&format!("{} — Vibey", project.name)));
+        // Terminals start once the window is realized (see `on_realized`).
+        if self.window.is_realized() && !project.terminals_started.replace(true) {
+            project.terminals.add_terminal(&current_theme());
+        }
+        self.update_status();
+        self.refresh_branch(&project);
+    }
+
+    /// Start the active project's terminal once the window exists (see main: GSK_RENDERER).
+    pub fn on_realized(self: &Rc<Self>) {
+        if let Some(p) = self.active_project() {
+            if !p.terminals_started.replace(true) {
+                p.terminals.add_terminal(&current_theme());
+            }
+        }
+    }
+
+    fn project_menu(self: &Rc<Self>, i: usize, anchor: &gtk::Box, x: f64, y: f64) {
+        let pop = gtk::Popover::new();
+        pop.set_parent(anchor);
+        pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        pop.set_position(gtk::PositionType::Right);
+        let b = gtk::Button::with_label("Close Project");
+        b.add_css_class("flat");
+        let me = Rc::downgrade(self);
+        let p = pop.clone();
+        b.connect_clicked(move |_| {
+            p.popdown();
+            if let Some(a) = me.upgrade() {
+                a.close_project(i);
+            }
+        });
+        pop.set_child(Some(&b));
+        pop.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        pop.popup();
+    }
+
+    fn close_project(self: &Rc<Self>, i: usize) {
+        let Some((project, _)) = self.projects.borrow().get(i).cloned() else { return };
+        let jobs = project.running_jobs();
+        if jobs.is_empty() {
+            self.remove_project(i);
+            return;
+        }
+        let me = Rc::downgrade(self);
+        self.confirm(
+            &format!("Close {}?", project.name),
+            &format!("Still running: {}. Closing the project stops them.", jobs.join(", ")),
+            "Close Project",
+            move || {
+                if let Some(a) = me.upgrade() {
+                    a.remove_project(i);
+                }
+            },
+        );
+    }
+
+    fn remove_project(self: &Rc<Self>, i: usize) {
+        if i >= self.projects.borrow().len() {
+            return;
+        }
+        let (project, item) = self.projects.borrow_mut().remove(i);
+        self.rail_projects.remove(&item);
+        self.stack.remove(&project.page);
+        let n = self.projects.borrow().len();
+        self.active.set(None);
+        if n == 0 {
+            self.stack.set_visible_child_name("welcome");
+            self.window.set_title(Some("Vibey"));
+            self.update_status();
+        } else {
+            self.activate(i.min(n - 1));
+        }
+    }
+
+    fn pick_folder(self: &Rc<Self>) {
+        let dialog = gtk::FileDialog::builder().title("Open Folder as Project").modal(true).build();
+        let me = Rc::downgrade(self);
+        dialog.select_folder(Some(&self.window), None::<&gio::Cancellable>, move |res| {
+            if let (Ok(folder), Some(a)) = (res, me.upgrade()) {
+                if let Some(path) = folder.path() {
+                    a.add_project(&path);
+                }
+            }
+        });
+    }
+
+    fn confirm(&self, heading: &str, body: &str, action: &str, then: impl Fn() + 'static) {
+        let dialog = gtk::AlertDialog::builder()
+            .message(heading)
+            .detail(body)
+            .buttons(["Cancel", action])
+            .cancel_button(0)
+            .default_button(0)
+            .modal(true)
+            .build();
+        dialog.choose(Some(&self.window), None::<&gio::Cancellable>, move |res| {
+            if res == Ok(1) {
+                then();
+            }
+        });
+    }
+
+    fn install_close_guard(self: &Rc<Self>) {
+        let me = Rc::downgrade(self);
+        self.window.connect_close_request(move |w| {
+            let Some(a) = me.upgrade() else { return glib::Propagation::Proceed };
+            if a.allow_close.get() {
+                return glib::Propagation::Proceed;
+            }
+            let jobs: Vec<String> = a
+                .projects
+                .borrow()
+                .iter()
+                .flat_map(|(p, _)| p.running_jobs().into_iter().map(|j| format!("{j} ({})", p.name)).collect::<Vec<_>>())
+                .collect();
+            if jobs.is_empty() {
+                return glib::Propagation::Proceed;
+            }
+            let w = w.clone();
+            let me2 = Rc::downgrade(&a);
+            a.confirm(
+                "Close Vibey?",
+                &format!("Still running: {}. Closing Vibey stops them.", jobs.join(", ")),
+                "Close Anyway",
+                move || {
+                    if let Some(a) = me2.upgrade() {
+                        a.allow_close.set(true);
+                    }
+                    w.close();
+                },
+            );
+            glib::Propagation::Stop
+        });
+    }
+
+    // ---- status bar ----
+
+    fn update_status(&self) {
+        match self.active_project() {
+            Some(p) => {
+                self.status_project.set_markup(&format!(
+                    "<span font_family=\"codicon\">{}</span> {}",
+                    codicon::FOLDER_OPENED,
+                    glib::markup_escape_text(&p.name)
+                ));
+                self.show_status(p.editor.status());
+            }
+            None => {
+                self.status_project.set_text("");
+                self.status_branch.set_text("");
+                self.show_status(None);
+            }
+        }
+    }
+
+    fn show_status(&self, st: Option<Status>) {
+        self.status_right.set_visible(st.is_some());
+        if let Some(st) = st {
+            self.status_pos.set_text(&format!("Ln {}, Col {}", st.line, st.col));
+            self.status_indent.set_text(&st.indentation);
+            self.status_eol.set_text(st.eol);
+            self.status_lang.set_text(&st.language);
+        }
+    }
+
+    fn refresh_branch(self: &Rc<Self>, project: &Rc<Project>) {
+        let root = project.root.clone();
+        let me = Rc::downgrade(self);
+        let weak_p = Rc::downgrade(project);
+        glib::spawn_future_local(async move {
+            let branch = gio::spawn_blocking(move || {
+                std::process::Command::new("git")
+                    .args(["--no-optional-locks", "rev-parse", "--abbrev-ref", "HEAD"])
+                    .current_dir(&root)
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            })
+            .await
+            .ok()
+            .flatten();
+            let (Some(a), Some(p)) = (me.upgrade(), weak_p.upgrade()) else { return };
+            if a.active_project().is_some_and(|ap| Rc::ptr_eq(&ap, &p)) {
+                match branch {
+                    Some(b) => a.status_branch.set_markup(&format!(
+                        "<span font_family=\"codicon\">{}</span> {}",
+                        codicon::GIT_BRANCH,
+                        glib::markup_escape_text(&b)
+                    )),
+                    None => a.status_branch.set_text(""),
+                }
+            }
+        });
+    }
+
+    // ---- themes ----
+
+    pub fn apply_theme(&self, id: &str, save: bool) {
+        let model = Rc::new(ThemeModel::load(id));
+        let static_css = scale_css(include_str!("../assets/style.css"), self.scale);
+        self.css.load_from_string(&(model.css_colors() + &static_css));
+        if let Some(s) = gtk::Settings::default() {
+            s.set_gtk_application_prefer_dark_theme(model.kind == Kind::Dark);
+        }
+        {
+            let mut st = self.style.borrow_mut();
+            st.theme_id = model.id.clone();
+            st.brackets = Arc::new(model.bracket_colors());
+            st.line_number = model.get("editorLineNumber.foreground");
+            st.changed = model.get("diffEditor.insertedLineBackground");
+            st.find_match = model.get("editor.findMatchHighlightBackground");
+            st.find_current = model.get("editor.findMatchBackground");
+        }
+        THEME.with(|t| *t.borrow_mut() = Some(model.clone()));
+        for (p, _) in self.projects.borrow().iter() {
+            p.editor.restyle();
+            p.terminals.restyle(&model);
+        }
+        if save {
+            self.config.borrow_mut().theme = model.id.clone();
+            config::save(&self.config.borrow());
+        }
+    }
+
+    pub fn quick(&self) -> &Rc<QuickPick> {
+        &self.quick
+    }
+
+    pub fn open_theme_picker(self: &Rc<Self>) {
+        let provider = Rc::new(ThemeProvider {
+            app: Rc::downgrade(self),
+            original: current_theme().id.clone(),
+            entries: theme::catalog(),
+            pending: Rc::new(RefCell::new(None)),
+        });
+        self.quick.open(provider, gtk::prelude::GtkWindowExt::focus(&self.window));
+    }
+
+    // ---- shortcuts ----
+
+    fn install_shortcuts(self: &Rc<Self>) {
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let me = Rc::downgrade(self);
+        keys.connect_key_pressed(move |_, key, _, mods| {
+            let Some(a) = me.upgrade() else { return glib::Propagation::Proceed };
+            if a.handle_key(key, mods) { glib::Propagation::Stop } else { glib::Propagation::Proceed }
+        });
+        self.window.add_controller(keys);
+    }
+
+    pub fn handle_key(self: &Rc<Self>, key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
+        use gtk::gdk::{Key, ModifierType as M};
+        if self.quick.is_open() {
+            return false;
+        }
+        let ctrl = mods.contains(M::CONTROL_MASK);
+        let shift = mods.contains(M::SHIFT_MASK);
+        let alt = mods.contains(M::ALT_MASK);
+        // In a terminal, only a few keys are taken (like VS Code's commandsToSkipShell);
+        // everything else (Ctrl+W, Ctrl+F, …) belongs to the shell / CLI.
+        let in_terminal = gtk::prelude::GtkWindowExt::focus(&self.window).is_some_and(|w| {
+            w.is::<vte4::Terminal>() || w.ancestor(vte4::Terminal::static_type()).is_some()
+        });
+        let k = key.to_lower();
+
+        if self.chord.replace(false) && ctrl && k == Key::t {
+            self.open_theme_picker();
+            return true;
+        }
+        if !ctrl || alt {
+            return false;
+        }
+        if let Some(n) = key.to_unicode().and_then(|c| c.to_digit(10)).filter(|n| (1..=9).contains(n)) {
+            self.activate(n as usize - 1);
+            return true;
+        }
+        let project = self.active_project();
+        match k {
+            Key::p if !shift => {
+                if let Some(p) = project {
+                    let hl = current_theme().get("list.highlightForeground").hex();
+                    FileProvider::open(p, &self.quick, hl, gtk::prelude::GtkWindowExt::focus(&self.window));
+                }
+                true
+            }
+            Key::grave | Key::dead_grave => {
+                if let Some(p) = project {
+                    if shift {
+                        p.terminals.add_terminal(&current_theme());
+                    } else if in_terminal {
+                        p.editor.focus();
+                    } else if p.terminals.is_empty() {
+                        p.terminals.add_terminal(&current_theme());
+                    } else {
+                        p.terminals.focus();
+                    }
+                }
+                true
+            }
+            _ if in_terminal => false,
+            Key::k => {
+                self.chord.set(true);
+                true
+            }
+            Key::f => {
+                if let Some(p) = project {
+                    p.editor.show_find();
+                }
+                true
+            }
+            Key::w => {
+                if let Some(p) = project {
+                    p.editor.close_active();
+                }
+                true
+            }
+            Key::Tab | Key::ISO_Left_Tab => {
+                if let Some(p) = project {
+                    p.editor.cycle(!shift && key != Key::ISO_Left_Tab);
+                }
+                true
+            }
+            Key::Page_Down | Key::Page_Up => {
+                if let Some(p) = project {
+                    p.editor.cycle(k == Key::Page_Down);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Theme picker with live preview; Escape restores the original theme.
+struct ThemeProvider {
+    app: Weak<App>,
+    original: String,
+    entries: Vec<theme::ThemeEntry>,
+    /// Debounced preview; cleared when it fires so it's never removed twice.
+    pending: Rc<RefCell<Option<glib::SourceId>>>,
+}
+
+impl ThemeProvider {
+    fn cancel_pending(&self) {
+        if let Some(id) = self.pending.borrow_mut().take() {
+            id.remove();
+        }
+    }
+}
+
+impl Provider for ThemeProvider {
+    fn query(&self, query: &str, done: Box<dyn Fn(Vec<Item>)>) {
+        let hl = current_theme().get("list.highlightForeground").hex();
+        let mut last_group = "";
+        let items = self
+            .entries
+            .iter()
+            .filter_map(|e| {
+                let m = crate::fuzzy::score(query, &e.label)?;
+                Some((e, m))
+            })
+            .map(|(e, m)| {
+                let group = (e.group != last_group).then(|| e.group.to_string());
+                last_group = e.group;
+                Item {
+                    key: e.id.clone(),
+                    icon: String::new(),
+                    label: quickopen::highlight_markup(&e.label, &m.positions, 0, &hl),
+                    detail: if e.id == self.original { "current".into() } else { String::new() },
+                    group,
+                }
+            })
+            .collect();
+        done(items);
+    }
+
+    fn selected(&self, key: &str) {
+        // Debounce previews while arrowing through the list.
+        self.cancel_pending();
+        let (app, key, slot) = (self.app.clone(), key.to_string(), self.pending.clone());
+        let pending = glib::timeout_add_local_once(Duration::from_millis(120), move || {
+            slot.borrow_mut().take();
+            if let Some(a) = app.upgrade() {
+                if current_theme().id != key {
+                    a.apply_theme(&key, false);
+                }
+            }
+        });
+        *self.pending.borrow_mut() = Some(pending);
+    }
+
+    fn accept(&self, key: &str) {
+        self.cancel_pending();
+        if let Some(a) = self.app.upgrade() {
+            a.apply_theme(key, true);
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancel_pending();
+        if let Some(a) = self.app.upgrade() {
+            if current_theme().id != self.original {
+                a.apply_theme(&self.original, false);
+            }
+        }
+    }
+
+    fn placeholder(&self) -> String {
+        "Select Color Theme (Up/Down to preview)".into()
+    }
+
+    fn initial(&self) -> Option<String> {
+        Some(self.original.clone())
+    }
+}

@@ -50,7 +50,8 @@ fn twistie_glyph(row: &gtk::TreeListRow) -> &'static str {
     }
 }
 
-pub fn build(root: &Path, on_open: Rc<dyn Fn(PathBuf)>) -> gtk::ScrolledWindow {
+/// `on_open(path, pin)`: single click opens a preview tab, double click pins it.
+pub fn build(root: &Path, on_open: Rc<dyn Fn(PathBuf, bool)>) -> gtk::ScrolledWindow {
     let tree = gtk::TreeListModel::new(dir_model(&gio::File::for_path(root)), false, false, |item| {
         let info = item.downcast_ref::<gio::FileInfo>()?;
         if !is_dir(info) {
@@ -90,14 +91,16 @@ pub fn build(root: &Path, on_open: Rc<dyn Fn(PathBuf)>) -> gtk::ScrolledWindow {
         let on_open = on_open.clone();
         let exp = expander.clone();
         let tw = twistie.clone();
-        click.connect_released(move |_, _, _, _| {
+        click.connect_released(move |_, n_press, _, _| {
             let Some(row) = exp.list_row() else { return };
             let Some(info) = row.item().and_downcast::<gio::FileInfo>() else { return };
             if is_dir(&info) {
-                row.set_expanded(!row.is_expanded());
-                tw.set_text(twistie_glyph(&row));
+                if n_press == 1 {
+                    row.set_expanded(!row.is_expanded());
+                    tw.set_text(twistie_glyph(&row));
+                }
             } else if let Some(path) = file_of(&info).and_then(|f| f.path()) {
-                on_open(path);
+                on_open(path, n_press >= 2);
             }
         });
         row.add_controller(click);

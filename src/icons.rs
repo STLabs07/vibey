@@ -20,6 +20,13 @@ pub mod codicon {
     pub const CHEVRON_DOWN: &str = "\u{eab4}";
     pub const CLOSE: &str = "\u{ea76}";
     pub const GIT_BRANCH: &str = "\u{ea68}";
+    pub const ARROW_UP: &str = "\u{eaa1}";
+    pub const ARROW_DOWN: &str = "\u{ea9a}";
+    pub const CASE_SENSITIVE: &str = "\u{eab1}";
+    pub const ADD: &str = "\u{ea60}";
+    pub const SETTINGS_GEAR: &str = "\u{eb51}";
+    pub const TERMINAL: &str = "\u{ea85}";
+    pub const FOLDER_OPENED: &str = "\u{eaf7}";
 }
 const SETI_MAP: &str = include_str!("../assets/icons/vs-seti-icon-theme.json");
 
