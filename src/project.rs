@@ -14,6 +14,7 @@ use crate::editor::EditorGroup;
 use crate::icons::{self, codicon};
 use crate::quickopen::{self, Item, Provider, QuickPick};
 use crate::terminal::TerminalPanel;
+use crate::searchview::{self, SearchView};
 use crate::tree::Tree;
 use crate::{fuzzy, git};
 
@@ -34,6 +35,7 @@ pub struct Project {
     indexing: Cell<bool>,
     recent: RefCell<Vec<PathBuf>>,
     tree: OnceCell<Rc<Tree>>,
+    pub search: OnceCell<Rc<SearchView>>,
     pub git: RefCell<Rc<git::Status>>,
     git_timer: Cell<bool>,
     git_busy: Cell<bool>,
@@ -79,6 +81,7 @@ impl Project {
             indexing: Cell::new(false),
             recent: RefCell::new(Vec::new()),
             tree: OnceCell::new(),
+            search: OnceCell::new(),
             git: RefCell::new(Rc::new(git::Status::default())),
             git_timer: Cell::new(false),
             git_busy: Cell::new(false),
@@ -101,7 +104,8 @@ impl Project {
         chevron.add_css_class("codicon");
         section.append(&chevron);
         section.append(&gtk::Label::new(Some(&project.name)));
-        sidebar.append(&section);
+        let tree_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        tree_page.append(&section);
         let (w1, w2) = (Rc::downgrade(&project), Rc::downgrade(&project));
         let tree = Tree::new(
             root,
@@ -116,8 +120,35 @@ impl Project {
                 }
             }),
         );
-        sidebar.append(&tree.widget);
+        tree_page.append(&tree.widget);
         let _ = project.tree.set(tree);
+        let (w1, w2, w3, w4) =
+            (Rc::downgrade(&project), Rc::downgrade(&project), Rc::downgrade(&project), Rc::downgrade(&project));
+        let search = SearchView::new(
+            root,
+            &tree_page,
+            searchview::Callbacks {
+                index: Rc::new(move || w1.upgrade().map(|p| p.index.borrow().clone()).unwrap_or_default()),
+                on_focus: Rc::new(move || {
+                    if let Some(p) = w2.upgrade() {
+                        p.refresh_index(false, Rc::new(|| {}));
+                    }
+                }),
+                open_file: Rc::new(move |path| {
+                    if let Some(p) = w3.upgrade() {
+                        p.open_file(&path, true);
+                    }
+                }),
+                open_hit: Rc::new(move |path, line, col, len| {
+                    if let Some(p) = w4.upgrade() {
+                        p.editor.reveal(&path, line, col, len);
+                        p.note_recent(&path);
+                    }
+                }),
+            },
+        );
+        sidebar.append(&search.widget);
+        let _ = project.search.set(search);
         project.page.set_start_child(Some(&sidebar));
         let weak = Rc::downgrade(&project);
         project.editor.set_on_reload(Rc::new(move || {
@@ -126,6 +157,7 @@ impl Project {
             }
         }));
         project.refresh_git();
+        project.refresh_index(false, Rc::new(|| {}));
         project
     }
 
@@ -209,6 +241,10 @@ impl Project {
 
     pub fn open_file(&self, path: &Path, pin: bool) {
         self.editor.open(path, pin);
+        self.note_recent(path);
+    }
+
+    fn note_recent(&self, path: &Path) {
         let mut recent = self.recent.borrow_mut();
         recent.retain(|p| p != path);
         recent.insert(0, path.to_path_buf());

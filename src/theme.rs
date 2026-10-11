@@ -228,6 +228,14 @@ const CSS_KEYS: &[&str] = &[
     "button.foreground",
     "badge.background",
     "badge.foreground",
+    "titleBar.activeBackground",
+    "titleBar.activeForeground",
+    "titleBar.inactiveBackground",
+    "titleBar.border",
+    "commandCenter.background",
+    "commandCenter.foreground",
+    "commandCenter.border",
+    "commandCenter.activeBackground",
     "gitDecoration.modifiedResourceForeground",
     "gitDecoration.untrackedResourceForeground",
     "gitDecoration.addedResourceForeground",
@@ -434,7 +442,14 @@ impl ThemeModel {
             "panel.background" | "sideBar.background" | "activityBar.background" | "statusBar.background"
             | "editorGroupHeader.tabsBackground" | "tab.inactiveBackground" | "tab.activeBackground"
             | "breadcrumb.background" | "editorWidget.background" | "tab.hoverBackground" => "editor.background",
-            "sideBarSectionHeader.background" => "sideBar.background",
+            "sideBarSectionHeader.background" | "titleBar.activeBackground" | "titleBar.inactiveBackground" => {
+                "sideBar.background"
+            }
+            "titleBar.activeForeground" => "foreground",
+            "titleBar.border" | "commandCenter.border" => "widget.shadow",
+            "commandCenter.background" => "input.background",
+            "commandCenter.foreground" => "descriptionForeground",
+            "commandCenter.activeBackground" => "list.hoverBackground",
             "quickInput.foreground" | "quickInputList.focusForeground" | "list.activeSelectionForeground"
             | "sideBarSectionHeader.foreground" | "sideBarTitle.foreground" | "sideBar.foreground"
             | "tab.activeForeground" | "panelTitle.activeForeground" | "activityBar.foreground"

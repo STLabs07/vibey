@@ -266,6 +266,18 @@ impl EditorGroup {
         self.tabs.borrow().iter().map(|t| t.view.clone()).collect()
     }
 
+    pub fn has_active(&self) -> bool {
+        self.active_tab().is_some()
+    }
+
+    /// Open `path` pinned and select a match at (0-based line, byte column, byte length).
+    pub fn reveal(&self, path: &Path, line: u32, col: usize, len: usize) {
+        self.open(path, true);
+        if let Some(t) = self.active_tab() {
+            t.view.reveal(line as i32, col as i32, len as i32);
+        }
+    }
+
     /// Open (or focus) `path`. `pin = false` opens a preview tab.
     pub fn open(&self, path: &Path, pin: bool) {
         let existing = self.tabs.borrow().iter().position(|t| t.view.path() == path);

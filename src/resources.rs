@@ -35,6 +35,8 @@ pub struct ResourcePanel {
     grid: gtk::Grid,
     footer: gtk::Label,
     sort: Cell<SortBy>,
+    /// CPU numbers are shown as a share of the whole machine.
+    cores: Cell<f32>,
     sort_buttons: Vec<(SortBy, gtk::ToggleButton)>,
     last: RefCell<Option<(Rc<Report>, Rc<Vec<ProjectUsage>>)>>,
     on_killed: RefCell<Option<Rc<dyn Fn()>>>,
@@ -110,6 +112,7 @@ impl ResourcePanel {
             grid,
             footer,
             sort: Cell::new(SortBy::Memory),
+            cores: Cell::new(1.0),
             sort_buttons,
             last: RefCell::new(None),
             on_killed: RefCell::new(None),
@@ -177,7 +180,9 @@ impl ResourcePanel {
             return;
         };
         let mut row = 0;
-        for (col, text) in ["", "PID", "CPU", "Memory", ""].iter().enumerate() {
+        let cores = report.cpus.max(1) as f32;
+        self.cores.set(cores);
+        for (col, text) in ["", "PID", "CPU (whole machine)", "RAM", ""].iter().enumerate() {
             let l = gtk::Label::new(Some(text));
             l.add_css_class("res-colhead");
             l.set_xalign(if col == 0 { 0.0 } else { 1.0 });
@@ -217,11 +222,11 @@ impl ResourcePanel {
         }
         let used = report.mem_total_kb.saturating_sub(report.mem_available_kb);
         self.footer.set_text(&format!(
-            "Vibey + terminals: {} · {:.0}% CPU    System: load {:.2} on {} cores · {} of {} RAM used",
+            "Vibey + all terminals: {} RAM · {:.1}% CPU    CPU % is of the whole machine ({} cores = 100%).    System: load {:.2} · {} of {} RAM used",
             procmon::fmt_mem(report.total_mem_kb),
-            report.total_cpu,
-            report.load1,
+            report.total_cpu / cores,
             report.cpus,
+            report.load1,
             procmon::fmt_mem(used),
             procmon::fmt_mem(report.mem_total_kb),
         ));
@@ -247,7 +252,8 @@ impl ResourcePanel {
         name_l.set_margin_start(depth * 16);
         name_l.add_css_class(class);
         let pid_l = gtk::Label::new(Some(&pid.map(|p| p.to_string()).unwrap_or_default()));
-        let cpu_l = gtk::Label::new(Some(&format!("{cpu:.1}%")));
+        let share = cpu / self.cores.get();
+        let cpu_l = gtk::Label::new(Some(&if share < 10.0 { format!("{share:.1}%") } else { format!("{share:.0}%") }));
         let mem_l = gtk::Label::new(Some(&procmon::fmt_mem(mem_kb)));
         for (i, l) in [&name_l, &pid_l, &cpu_l, &mem_l].into_iter().enumerate() {
             if i > 0 {

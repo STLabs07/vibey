@@ -39,6 +39,12 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
                 p.editor.set_find_query(arg);
             }
         }
+        "search" => {
+            if let Some(s) = app.active_project().and_then(|p| p.search.get().cloned()) {
+                s.focus();
+                s.set_query(arg);
+            }
+        }
         "enter" => {
             if app.quick().is_open() {
                 app.quick().accept_selected();
@@ -144,20 +150,25 @@ fn parse_key(spec: &str) -> (gdk::Key, gdk::ModifierType) {
     (key, mods)
 }
 
-/// Render the window with a software renderer and save it as PNG.
+/// Render the window (title bar + content) with a software renderer and save it as PNG.
 fn shot(window: &gtk::ApplicationWindow, path: &str) -> Result<(), String> {
-    // A toplevel can't be painted by WidgetPaintable; its child can.
+    // A toplevel can't be painted by WidgetPaintable; its title bar and child can.
     let child = window.child().ok_or("window has no child")?;
-    let (w, h) = (child.width(), child.height());
-    let paintable = gtk::WidgetPaintable::new(Some(&child));
+    let bar = window.titlebar();
+    let (w, ch) = (child.width(), child.height());
+    let th = bar.as_ref().map_or(0, |b| b.height());
     let snapshot = gtk::Snapshot::new();
-    paintable.snapshot(&snapshot, w as f64, h as f64);
+    if let Some(bar) = &bar {
+        gtk::WidgetPaintable::new(Some(bar)).snapshot(&snapshot, w as f64, th as f64);
+    }
+    snapshot.translate(&gtk::graphene::Point::new(0.0, th as f32));
+    gtk::WidgetPaintable::new(Some(&child)).snapshot(&snapshot, w as f64, ch as f64);
     let node = snapshot
         .to_node()
-        .ok_or_else(|| format!("nothing rendered (mapped={}, {w}x{h})", window.is_mapped()))?;
+        .ok_or_else(|| format!("nothing rendered (mapped={}, {w}x{ch})", window.is_mapped()))?;
     let renderer = gsk::CairoRenderer::new();
     renderer.realize_for_display(&WidgetExt::display(window)).map_err(|e| e.to_string())?;
-    let texture = renderer.render_texture(&node, Some(&gtk::graphene::Rect::new(0.0, 0.0, w as f32, h as f32)));
+    let texture = renderer.render_texture(&node, Some(&gtk::graphene::Rect::new(0.0, 0.0, w as f32, (th + ch) as f32)));
     renderer.unrealize();
     texture.save_to_png(path).map_err(|e| e.to_string())
 }

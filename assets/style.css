@@ -14,20 +14,20 @@ window.vibey label { color: inherit; }
 .rail {
   background-color: @vs_activityBar_background;
   border-right: 1px solid @vs_activityBar_border;
-  min-width: {{48}};
+  min-width: {{58}};
 }
 .rail .project {
-  min-width: {{46}};
+  min-width: {{56}};
   color: @vs_activityBar_inactiveForeground;
   border-left: {{2}} solid transparent;
 }
 .rail .project.active { color: @vs_activityBar_foreground; border-left-color: @vs_activityBar_activeBorder; }
 .rail .project:hover .avatar { opacity: 0.9; }
 .rail .avatar {
-  min-width: {{28}}; min-height: {{28}};
-  border-radius: {{6}};
+  min-width: {{38}}; min-height: {{38}};
+  border-radius: {{9}};
   color: #ffffff;
-  font-weight: 700; font-size: {{~12}};
+  font-weight: 700; font-size: {{~15}};
   opacity: 0.6;
 }
 .rail .project.active .avatar { opacity: 1; }
@@ -40,20 +40,20 @@ window.vibey label { color: inherit; }
 .avatar.c6 { background-color: #4A6FC4; }
 .avatar.c7 { background-color: #2F8F8F; }
 button.rail-button {
-  min-width: {{48}}; min-height: {{48}};
+  min-width: {{58}}; min-height: {{52}};
   padding: 0;
   font-size: {{~24}};
   color: @vs_activityBar_inactiveForeground;
 }
 button.rail-button:hover { color: @vs_activityBar_foreground; }
-button.rail-button > label { font-family: "codicon"; font-size: {{~24}}; }
+button.rail-button > label { font-family: "codicon"; font-size: {{~28}}; }
 menubutton.rail-menu > button {
   background: none; border: none; box-shadow: none; outline: none;
   min-width: {{48}}; min-height: {{48}}; padding: 0;
   color: @vs_activityBar_inactiveForeground;
 }
 menubutton.rail-menu > button:hover { color: @vs_activityBar_foreground; }
-menubutton.rail-menu label.codicon { font-size: {{~24}}; }
+menubutton.rail-menu label.codicon { font-size: {{~28}}; }
 
 /* ---- sidebar / explorer ---- */
 .sidebar {
@@ -159,8 +159,39 @@ gutter { background-color: @vs_editor_background; }
   color: @vs_panelTitle_inactiveForeground;
 }
 .panel-tab.active { color: @vs_panelTitle_activeForeground; background-color: @vs_list_inactiveSelectionBackground; }
-.term-tab { padding: 0 {{8}}; color: @vs_panelTitle_inactiveForeground; }
-.term-tab label.codicon { margin-right: {{4}}; }
+/* numbered terminal tabs, colored by what runs in them */
+@define-color cli_claude #D97757;
+@define-color cli_codex #10A37F;
+@define-color cli_gemini #4E86F7;
+@define-color cli_ai #A371F7;
+.term-tabs { margin-left: {{6}}; }
+.term-tab {
+  margin: {{5}} {{2}};
+  padding: 0 {{8}} 0 {{4}};
+  border-radius: {{4}};
+  color: @vs_panelTitle_inactiveForeground;
+  border: 1px solid transparent;
+}
+.term-tab:hover { background-color: @vs_list_hoverBackground; }
+.term-tab.active { color: @vs_panelTitle_activeForeground; background-color: @vs_list_inactiveSelectionBackground; }
+window.vibey .term-num {
+  min-width: {{18}}; min-height: {{18}};
+  margin-right: {{6}};
+  border-radius: {{4}};
+  font-weight: 700; font-size: {{~11}};
+  color: #ffffff;
+  background-color: alpha(@vs_foreground, 0.25);
+}
+.term-tab.cli-claude .term-num { background-color: @cli_claude; }
+.term-tab.cli-codex .term-num { background-color: @cli_codex; }
+.term-tab.cli-gemini .term-num { background-color: @cli_gemini; }
+.term-tab.cli-ai .term-num { background-color: @cli_ai; }
+.term-tab.cli-proc .term-num { background-color: @vs_focusBorder; }
+.term-tab.active.cli-claude { border-color: alpha(@cli_claude, 0.7); background-color: alpha(@cli_claude, 0.16); }
+.term-tab.active.cli-codex { border-color: alpha(@cli_codex, 0.7); background-color: alpha(@cli_codex, 0.16); }
+.term-tab.active.cli-gemini { border-color: alpha(@cli_gemini, 0.7); background-color: alpha(@cli_gemini, 0.16); }
+.term-tab.active.cli-ai { border-color: alpha(@cli_ai, 0.7); background-color: alpha(@cli_ai, 0.16); }
+
 .term-tab .close { opacity: 0; margin-left: {{4}}; font-size: {{~14}}; }
 .term-tab:hover .close { opacity: 0.8; }
 .term-tab .status-dot { font-family: "codicon"; font-size: {{~10}}; margin-left: {{4}}; }
@@ -169,9 +200,69 @@ gutter { background-color: @vs_editor_background; }
 .term-tab.attention { color: @vs_panelTitle_activeForeground; }
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.25; } 100% { opacity: 1; } }
 
+/* ---- title bar (VS Code's custom title bar) ---- */
+headerbar.titlebar-vibey {
+  min-height: {{35}};
+  padding: 0 {{4}};
+  background: @vs_titleBar_activeBackground;
+  color: @vs_titleBar_activeForeground;
+  border-bottom: 1px solid @vs_titleBar_border;
+  box-shadow: none;
+}
+window:backdrop headerbar.titlebar-vibey { background: @vs_titleBar_inactiveBackground; }
+headerbar.titlebar-vibey windowcontrols button {
+  background: none; border: none; box-shadow: none;
+  min-width: {{28}}; min-height: {{28}}; padding: 0; margin: 0 {{2}};
+  color: @vs_titleBar_activeForeground;
+}
+headerbar.titlebar-vibey windowcontrols button:hover { background: @vs_list_hoverBackground; }
+headerbar.titlebar-vibey windowcontrols button.close:hover { background: #E81123; color: #ffffff; }
+button.command-center {
+  min-height: {{24}};
+  margin: {{5}} 0;
+  padding: 0 {{10}};
+  background: @vs_commandCenter_background;
+  color: @vs_commandCenter_foreground;
+  border: 1px solid @vs_commandCenter_border;
+  border-radius: {{6}};
+  box-shadow: none;
+}
+button.command-center:hover { background: @vs_commandCenter_activeBackground; color: @vs_foreground; }
+.command-center label.codicon { font-size: {{~14}}; }
+.cc-keys { opacity: 0.7; font-size: {{~12}}; }
+button.res-button {
+  background: none; border: none; box-shadow: none;
+  margin: {{5}} {{6}};
+  padding: 0 {{10}};
+  min-height: {{24}};
+  border-radius: {{6}};
+  color: @vs_titleBar_activeForeground;
+}
+button.res-button:hover { background: @vs_list_hoverBackground; }
+button.res-button label.codicon, button.res-button label { font-size: {{~12}}; }
+
+/* ---- Explorer search ---- */
+.side-search-bar { padding: {{4}} {{8}} {{6}} {{10}}; }
+window.vibey entry.side-search { min-height: {{26}}; }
+.search-summary { padding: {{4}} {{12}}; color: @vs_descriptionForeground; font-size: {{~12}}; }
+list.search-results { background: transparent; }
+list.search-results > row { padding: 0; outline: none; }
+list.search-results > row:hover { background-color: @vs_list_hoverBackground; }
+list.search-results > row:selected { background-color: @vs_list_activeSelectionBackground; }
+.search-group { padding: {{8}} {{12}} {{2}}; font-size: {{~11}}; font-weight: 700; color: @vs_sideBarSectionHeader_foreground; }
+.search-file { min-height: {{22}}; padding: 0 {{8}} 0 {{12}}; }
+.search-file label.seti { margin-right: {{4}}; }
+.search-file > label:not(.seti) { margin-right: {{6}}; }
+.count-badge {
+  min-width: {{16}}; padding: 0 {{5}}; border-radius: {{9}};
+  font-size: {{~11}};
+  background: @vs_badge_background; color: @vs_badge_foreground;
+}
+.search-hit { min-height: {{22}}; padding: 0 {{8}} 0 {{26}}; font-size: {{~12}}; }
+.hit-line { min-width: {{30}}; margin-right: {{8}}; color: @vs_descriptionForeground; font-feature-settings: "tnum"; }
+
 /* resources */
-.status-res:hover { color: @vs_foreground; }
-.rail .res-chip { font-size: {{~9}}; color: @vs_activityBar_inactiveForeground; margin-top: {{-8}}; margin-bottom: {{6}}; }
+.rail .res-chip { font-size: {{~10}}; color: @vs_activityBar_inactiveForeground; margin-top: {{-8}}; margin-bottom: {{6}}; }
 .res-header { padding: 0 0 {{6}} {{6}}; }
 .res-title { font-weight: 700; }
 .res-sort { padding: 0 {{8}}; min-height: {{22}}; }
@@ -200,7 +291,7 @@ listview.tree > row:selected .git-badge { color: inherit; }
 .tab.git-conflict .tab-label { color: @vs_gitDecoration_conflictingResourceForeground; }
 .rail .dirty, .rail .badge { font-size: 1px; padding: 0; }
 .rail .dirty {
-  min-width: {{6}}; min-height: {{6}};
+  min-width: {{8}}; min-height: {{8}};
   margin: 0 {{-2}} {{-2}} 0;
   border-radius: 50%;
   opacity: 0;
@@ -209,7 +300,7 @@ listview.tree > row:selected .git-badge { color: inherit; }
 
 /* rail badges: running = pulsing ring, attention = filled dot */
 .rail .badge {
-  min-width: {{8}}; min-height: {{8}};
+  min-width: {{10}}; min-height: {{10}};
   margin: {{-3}} {{-3}} 0 0;
   border-radius: 50%;
   opacity: 0;

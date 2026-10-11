@@ -10,6 +10,8 @@ mod procmon;
 mod project;
 mod quickopen;
 mod resources;
+mod search;
+mod searchview;
 mod selftest;
 mod session;
 mod terminal;

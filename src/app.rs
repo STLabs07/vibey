@@ -37,7 +37,9 @@ pub struct App {
     stack: gtk::Stack,
     status_project: gtk::Label,
     status_branch: gtk::Label,
-    status_res: gtk::Label,
+    /// Title bar: total resources (top right) and the search box (center).
+    res_label: gtk::Label,
+    search_label: gtk::Label,
     status_right: gtk::Box,
     status_pos: gtk::Label,
     status_indent: gtk::Label,
@@ -86,6 +88,11 @@ fn scale_css(src: &str, scale: f64) -> String {
     out
 }
 
+/// CPU share with enough precision to never read as an ambiguous "0%".
+fn fmt_pct(p: f32) -> String {
+    if p < 10.0 { format!("{p:.1}%") } else { format!("{p:.0}%") }
+}
+
 fn label(text: &str, class: &str) -> gtk::Label {
     let l = gtk::Label::new(Some(text));
     if !class.is_empty() {
@@ -123,6 +130,34 @@ impl App {
             .default_height(900)
             .build();
         window.add_css_class("vibey");
+
+        // Title bar (VS Code style): search box in the middle, total resources on the right.
+        let header = gtk::HeaderBar::new();
+        header.add_css_class("titlebar-vibey");
+        let search_btn = gtk::Button::new();
+        search_btn.add_css_class("command-center");
+        search_btn.set_focus_on_click(false);
+        search_btn.set_tooltip_text(Some("Go to File (Ctrl+P). To search inside files, use the box in the Explorer (Ctrl+Shift+F)."));
+        let sb = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let search_icon = label(codicon::SEARCH, "codicon");
+        let search_label = label("Search files", "cc-label");
+        search_label.set_hexpand(true);
+        search_label.set_xalign(0.0);
+        search_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        let search_keys = label("Ctrl+P", "cc-keys");
+        sb.append(&search_icon);
+        sb.append(&search_label);
+        sb.append(&search_keys);
+        search_btn.set_child(Some(&sb));
+        search_btn.set_size_request((480.0 * scale) as i32, -1);
+        header.set_title_widget(Some(&search_btn));
+        let res_button = gtk::Button::new();
+        res_button.add_css_class("res-button");
+        res_button.set_focus_on_click(false);
+        let res_label = label("Resources used: …", "");
+        res_button.set_child(Some(&res_label));
+        header.pack_end(&res_button);
+        window.set_titlebar(Some(&header));
 
         let css = gtk::CssProvider::new();
         gtk::style_context_add_provider_for_display(
@@ -165,11 +200,8 @@ impl App {
         status.add_css_class("statusbar");
         let status_project = label("", "");
         let status_branch = label("", "");
-        let status_res = label("", "status-res");
-        status_res.set_tooltip_text(Some("Vibey + terminals: memory (PSS) and CPU. Click for details (Ctrl+Shift+R)."));
         status.append(&status_project);
         status.append(&status_branch);
-        status.append(&status_res);
         let sp = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         sp.set_hexpand(true);
         status.append(&sp);
@@ -215,7 +247,8 @@ impl App {
             stack,
             status_project,
             status_branch,
-            status_res,
+            res_label,
+            search_label,
             status_right,
             status_pos,
             status_indent,
@@ -266,14 +299,18 @@ impl App {
                 }
             }
         });
-        let click = gtk::GestureClick::new();
         let me = Rc::downgrade(&app_rc);
-        click.connect_pressed(move |_, _, _, _| {
+        res_button.connect_clicked(move |_| {
             if let Some(a) = me.upgrade() {
                 a.toggle_resources();
             }
         });
-        app_rc.status_res.add_controller(click);
+        let me = Rc::downgrade(&app_rc);
+        search_btn.connect_clicked(move |_| {
+            if let Some(a) = me.upgrade() {
+                a.open_file_search();
+            }
+        });
         let me = Rc::downgrade(&app_rc);
         app_rc.resources.set_on_killed(Rc::new(move || {
             if let Some(a) = me.upgrade() {
@@ -341,6 +378,9 @@ impl App {
             }
         }));
         self.stack.add_child(&project.page);
+        if let Some(s) = project.search.get() {
+            s.set_highlight_color(current_theme().get("list.highlightForeground").hex());
+        }
         let me = Rc::downgrade(self);
         let weak_p = Rc::downgrade(&project);
         project.terminals.set_on_event(Rc::new(move |ev| {
@@ -430,6 +470,7 @@ impl App {
         item.add_css_class("active");
         self.active.set(Some(i));
         self.stack.set_visible_child(&project.page);
+        self.search_label.set_text(&format!("Search files in {}", project.name));
         self.update_visibility();
         // Terminals start once the window is realized (see `on_realized`).
         if self.window.is_realized() && !project.terminals_started.replace(true) {
@@ -761,24 +802,48 @@ impl App {
                 terminals: terms.into_iter().map(|(label, _)| (label, roots.next().cloned().flatten())).collect(),
             })
             .collect();
-        self.status_res.set_markup(&format!(
-            "<span font_family=\"codicon\">{}</span> {} · {:.0}%",
+        // One unambiguous number: everything Vibey and all projects' terminals use, with CPU
+        // as a share of the whole machine (all cores = 100%).
+        let cores = report.cpus.max(1) as f32;
+        let machine_cpu = report.total_cpu / cores;
+        let ram_share = report.total_mem_kb as f64 / report.mem_total_kb.max(1) as f64 * 100.0;
+        self.res_label.set_markup(&format!(
+            "<span font_family=\"codicon\">{}</span>  Resources used:  <b>{}</b> RAM  ·  <b>{}</b> CPU",
             codicon::PULSE,
             procmon::fmt_mem(report.total_mem_kb),
-            report.total_cpu
+            fmt_pct(machine_cpu)
         ));
+        let vibey_kb = report.vibey.mem_kb;
+        if let Some(b) = self.res_label.parent() {
+            b.set_tooltip_text(Some(&format!(
+                "Total for Vibey and everything running in every project's terminals.\n\n\
+                 RAM: {} ({:.1}% of your {} RAM)\n  Vibey itself: {}\n  Terminals and their programs: {}\n\n\
+                 CPU: {} of the whole machine ({} cores = 100%)\n\nClick for the per-project breakdown (Ctrl+Shift+R).",
+                procmon::fmt_mem(report.total_mem_kb),
+                ram_share,
+                procmon::fmt_mem(report.mem_total_kb),
+                procmon::fmt_mem(vibey_kb),
+                procmon::fmt_mem(report.total_mem_kb.saturating_sub(vibey_kb)),
+                fmt_pct(machine_cpu),
+                report.cpus,
+            )));
+        }
         for ((_, item), u) in self.projects.borrow().iter().zip(&usage) {
-            let (cpu, mem) = u.totals();
+            let (_, mem) = u.totals();
             if let Some(chip) = item.last_child().and_downcast::<gtk::Label>() {
                 chip.set_visible(mem > 0);
-                chip.set_text(&if cpu >= 1.0 {
-                    format!("{} {:.0}%", procmon::fmt_mem_short(mem), cpu)
-                } else {
-                    procmon::fmt_mem_short(mem)
-                });
+                chip.set_text(&procmon::fmt_mem_short(mem));
             }
         }
         self.resources.update(Rc::new(report), Rc::new(usage));
+    }
+
+    /// Ctrl+P / the title-bar search box.
+    pub fn open_file_search(self: &Rc<Self>) {
+        if let Some(p) = self.active_project() {
+            let hl = current_theme().get("list.highlightForeground").hex();
+            FileProvider::open(p, &self.quick, hl, gtk::prelude::GtkWindowExt::focus(&self.window));
+        }
     }
 
     pub fn toggle_resources(self: &Rc<Self>) {
@@ -864,7 +929,11 @@ impl App {
             st.git_deleted = model.get("editorGutter.deletedBackground");
         }
         THEME.with(|t| *t.borrow_mut() = Some(model.clone()));
+        let hl = model.get("list.highlightForeground").hex();
         for (p, _) in self.projects.borrow().iter() {
+            if let Some(s) = p.search.get() {
+                s.set_highlight_color(hl.clone());
+            }
             p.editor.restyle();
             p.terminals.restyle(&model);
         }
@@ -924,6 +993,13 @@ impl App {
             self.open_theme_picker();
             return true;
         }
+        // Alt+1…9: switch terminal in the current project (works inside terminals too).
+        if alt && !ctrl {
+            if let Some(n) = key.to_unicode().and_then(|c| c.to_digit(10)).filter(|n| (1..=9).contains(n)) {
+                return self.active_project().is_some_and(|p| p.terminals.activate_index(n as usize - 1));
+            }
+            return false;
+        }
         if !ctrl || alt {
             return false;
         }
@@ -934,9 +1010,18 @@ impl App {
         let project = self.active_project();
         match k {
             Key::p if !shift => {
+                self.open_file_search();
+                true
+            }
+            // Ctrl+F always does something: find in the open file, or (in a terminal / with
+            // no file open) the Explorer's project search. Ctrl+Shift+F: project search.
+            Key::f => {
                 if let Some(p) = project {
-                    let hl = current_theme().get("list.highlightForeground").hex();
-                    FileProvider::open(p, &self.quick, hl, gtk::prelude::GtkWindowExt::focus(&self.window));
+                    if !shift && !in_terminal && p.editor.has_active() {
+                        p.editor.show_find();
+                    } else if let Some(s) = p.search.get() {
+                        s.focus();
+                    }
                 }
                 true
             }
@@ -961,12 +1046,6 @@ impl App {
             }
             Key::k => {
                 self.chord.set(true);
-                true
-            }
-            Key::f => {
-                if let Some(p) = project {
-                    p.editor.show_find();
-                }
                 true
             }
             Key::w => {

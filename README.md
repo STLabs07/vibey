@@ -48,18 +48,23 @@ folders are restored on the next start.
 
 | Keys | Action |
 |---|---|
-| Ctrl+P | Go to file: fuzzy search over the whole project. Space-separated terms narrow it (`comp nav`). Alt+I includes git-ignored files |
-| Ctrl+F | Find in file (Enter / Shift+Enter: next / previous, Alt+C: match case) |
+| Ctrl+P (or the search box in the title bar) | Go to file: fuzzy search over the whole project. Space-separated terms narrow it (`comp nav`). Alt+I includes git-ignored files |
+| Ctrl+F | Find in the open file (Enter / Shift+Enter: next / previous, Alt+C: match case). In a terminal or with no file open: project search |
+| Ctrl+Shift+F | Project search: the box at the top of the Explorer searches file names and file contents; click a result to jump to the line |
+| Alt+1 … 9 | Switch terminal (tabs are numbered) |
 | Ctrl+1 … 9 | Switch project |
 | Ctrl+W, Ctrl+Tab, Ctrl+PageUp/Down | Close tab, cycle tabs |
 | Ctrl+` / Ctrl+Shift+` | Toggle focus editor ↔ terminal / new terminal |
 | Ctrl+K Ctrl+T | Color theme picker (live preview, Escape reverts) |
 | Ctrl+Shift+R | Resource panel: CPU / memory per project → terminal → process, with kill |
 
-Focus in a terminal: only Ctrl+P, Ctrl+1…9 and Ctrl+` are taken. Every other key (Ctrl+W,
+Focus in a terminal: only Ctrl+P, Ctrl+F, Ctrl+1…9, Alt+1…9 and Ctrl+` are taken. Every other key (Ctrl+W,
 Ctrl+F, Ctrl+K, …) goes to the shell or CLI.
 
-Terminal tabs are named after what's running in them. A project's rail avatar shows a pulsing
+Terminal tabs are numbered and named after what's running in them, and colored by AI CLI:
+Claude orange, Codex green, Gemini blue, other AI CLIs (aider, opencode, …) purple, shells gray.
+The top right of the title bar shows **Resources used**: RAM and CPU for Vibey plus everything
+running in all projects' terminals. CPU is a share of the whole machine (all cores = 100%). A project's rail avatar shows a pulsing
 ring while one of its terminals is working, and a blue dot when one finished while you were
 looking elsewhere, e.g. "Claude finished in project B" while you're in project A. When Vibey
 isn't focused, you also get a desktop notification.

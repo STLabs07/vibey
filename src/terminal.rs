@@ -40,6 +40,7 @@ struct Term {
     term: vte4::Terminal,
     chip: gtk::Box,
     dot: gtk::Label,
+    num: gtk::Label,
     name: gtk::Label,
     shell_pid: Cell<i32>,
     shell_name: String,
@@ -62,6 +63,30 @@ impl Term {
 
     fn label(&self) -> String {
         self.job.borrow().clone().unwrap_or_else(|| self.shell_name.clone())
+    }
+}
+
+const CLI_CLASSES: [&str; 6] = ["cli-claude", "cli-codex", "cli-gemini", "cli-ai", "cli-proc", "cli-shell"];
+
+/// Color class for a terminal by what runs in it: Claude orange, Codex green, Gemini blue,
+/// other AI CLIs purple, other programs neutral-accent, plain shells gray.
+pub fn cli_class(name: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    if n.starts_with("claude") {
+        "cli-claude"
+    } else if n.starts_with("codex") {
+        "cli-codex"
+    } else if n.starts_with("gemini") {
+        "cli-gemini"
+    } else if ["aider", "opencode", "cursor", "amp", "goose", "crush", "qwen", "copilot", "cline", "kilo", "droid", "llm", "ollama"]
+        .iter()
+        .any(|a| n.starts_with(a))
+    {
+        "cli-ai"
+    } else if ["bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "nu"].contains(&n.as_str()) {
+        "cli-shell"
+    } else {
+        "cli-proc"
     }
 }
 
@@ -100,17 +125,25 @@ impl TerminalPanel {
         title.add_css_class("panel-tab");
         title.add_css_class("active");
         header.append(&title);
-        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        spacer.set_hexpand(true);
-        header.append(&spacer);
+        // Numbered terminal tabs sit right next to the "Terminal" label.
         let header_tabs = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        header.append(&header_tabs);
+        header_tabs.add_css_class("term-tabs");
+        let tabs_scroll = gtk::ScrolledWindow::builder()
+            .child(&header_tabs)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .hscrollbar_policy(gtk::PolicyType::External)
+            .propagate_natural_width(true)
+            .build();
+        header.append(&tabs_scroll);
         let add = gtk::Button::with_label(codicon::ADD);
         add.add_css_class("icon-button");
         add.add_css_class("codicon");
         add.set_tooltip_text(Some("New Terminal (Ctrl+Shift+`)"));
         add.set_focus_on_click(false);
         header.append(&add);
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        header.append(&spacer);
 
         let stack = gtk::Stack::new();
         stack.set_vexpand(true);
@@ -211,15 +244,16 @@ impl TerminalPanel {
         chip.add_css_class("term-tab");
         let dot = gtk::Label::new(None);
         dot.add_css_class("status-dot");
-        let icon = gtk::Label::new(Some(codicon::TERMINAL));
-        icon.add_css_class("codicon");
+        let num = gtk::Label::new(None);
+        num.add_css_class("term-num");
         let shell_name = shell().rsplit('/').next().unwrap_or("sh").to_string();
         let name = gtk::Label::new(Some(&shell_name));
         let close = gtk::Label::new(Some(codicon::CLOSE));
         close.add_css_class("codicon");
         close.add_css_class("close");
         close.set_tooltip_text(Some("Kill Terminal"));
-        chip.append(&icon);
+        chip.add_css_class(cli_class(&shell_name));
+        chip.append(&num);
         chip.append(&name);
         chip.append(&dot);
         chip.append(&close);
@@ -230,6 +264,7 @@ impl TerminalPanel {
             term: term.clone(),
             chip: chip.clone(),
             dot,
+            num,
             name,
             shell_pid: Cell::new(0),
             shell_name,
@@ -282,7 +317,9 @@ impl TerminalPanel {
         let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(&t));
         term.connect_window_title_changed(move |term| {
             if let (Some(_), Some(t)) = (me.upgrade(), wt.upgrade()) {
-                t.chip.set_tooltip_text(term.window_title().as_deref());
+                if let Some(title) = term.window_title() {
+                    t.chip.set_tooltip_text(Some(&format!("{} · {title}", t.label())));
+                }
             }
         });
 
@@ -307,7 +344,26 @@ impl TerminalPanel {
             },
         );
         let n = self.terms.borrow().len();
+        self.renumber();
         self.activate(n - 1);
+    }
+
+    /// Tabs are numbered 1…n in order (Alt+1…9 jumps to them).
+    fn renumber(&self) {
+        for (i, t) in self.terms.borrow().iter().enumerate() {
+            t.num.set_text(&(i + 1).to_string());
+            t.chip.set_tooltip_text(Some(&format!("Terminal {} (Alt+{}): {}", i + 1, i + 1, t.label())));
+        }
+    }
+
+    /// Show terminal `i` (0-based) and focus it.
+    pub fn activate_index(&self, i: usize) -> bool {
+        if i < self.terms.borrow().len() {
+            self.activate(i);
+            true
+        } else {
+            false
+        }
     }
 
     fn index_of(&self, t: &Rc<Term>) -> Option<usize> {
@@ -365,6 +421,10 @@ impl TerminalPanel {
         t.job_since.set(job.as_ref().map(|_| Instant::now()));
         *t.job.borrow_mut() = job;
         t.name.set_text(&t.label());
+        for c in CLI_CLASSES {
+            t.chip.remove_css_class(c);
+        }
+        t.chip.add_css_class(cli_class(&t.label()));
         if ended_long_job {
             self.set_state(t, State::Attention);
         }
@@ -463,6 +523,7 @@ impl TerminalPanel {
         self.terms.borrow_mut().remove(i);
         self.header_tabs.remove(&t.chip);
         self.stack.remove(&t.term);
+        self.renumber();
         let n = self.terms.borrow().len();
         if n == 0 {
             self.stack.set_visible_child_name("empty");
@@ -531,3 +592,18 @@ fn apply_colors(term: &vte4::Terminal, theme: &ThemeModel) {
     term.set_color_cursor(Some(&theme.get("terminalCursor.foreground").gdk()));
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_clis() {
+        assert_eq!(cli_class("claude"), "cli-claude");
+        assert_eq!(cli_class("codex"), "cli-codex");
+        assert_eq!(cli_class("gemini"), "cli-gemini");
+        assert_eq!(cli_class("aider"), "cli-ai");
+        assert_eq!(cli_class("bash"), "cli-shell");
+        assert_eq!(cli_class("cargo"), "cli-proc");
+    }
+}

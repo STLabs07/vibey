@@ -291,6 +291,8 @@ pub struct CodeView {
     notify: RefCell<Option<Rc<dyn Fn()>>>,
     on_reload: RefCell<Option<Rc<dyn Fn()>>>,
     base: RefCell<Base>,
+    /// (0-based line, byte column, byte length) to select once the text is loaded.
+    pending_reveal: Cell<Option<(i32, i32, i32)>>,
 }
 
 impl CodeView {
@@ -339,6 +341,7 @@ impl CodeView {
             notify: RefCell::new(None),
             on_reload: RefCell::new(None),
             base: RefCell::new(None),
+            pending_reveal: Cell::new(None),
         });
         cv.apply_colors();
         let weak = Rc::downgrade(&cv);
@@ -366,6 +369,25 @@ impl CodeView {
         if let Some(f) = f {
             f();
         }
+    }
+
+    /// Select a match and scroll it into view (now, or once the file has loaded).
+    pub fn reveal(&self, line: i32, col: i32, len: i32) {
+        self.pending_reveal.set(Some((line, col, len)));
+        if self.text.borrow().is_some() {
+            self.apply_reveal();
+        }
+    }
+
+    fn apply_reveal(&self) {
+        let Some((line, col, len)) = self.pending_reveal.take() else { return };
+        let buffer = self.view.buffer();
+        let Some(start) = buffer.iter_at_line_index(line, col).or_else(|| buffer.iter_at_line(line)) else { return };
+        let end = buffer.iter_at_line_index(line, col + len).unwrap_or(start);
+        buffer.select_range(&start, &end);
+        let mark = buffer.create_mark(None, &start, true);
+        self.view.scroll_to_mark(&mark, 0.0, true, 0.0, 0.3);
+        buffer.delete_mark(&mark);
     }
 
     /// Called after the file changed on disk and was reloaded.
@@ -621,6 +643,7 @@ impl CodeView {
             self.find(&q, case);
         }
         self.apply_metrics();
+        self.apply_reveal();
         self.emit();
         if is_reload {
             let f = self.on_reload.borrow().clone();

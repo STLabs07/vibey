@@ -29,6 +29,7 @@ pub mod codicon {
     pub const FOLDER_OPENED: &str = "\u{eaf7}";
     pub const CIRCLE_FILLED: &str = "\u{ea71}";
     pub const PULSE: &str = "\u{eb31}";
+    pub const SEARCH: &str = "\u{ea6d}";
 }
 const SETI_MAP: &str = include_str!("../assets/icons/vs-seti-icon-theme.json");
 
