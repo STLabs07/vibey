@@ -45,6 +45,8 @@ pub struct EditorGroup {
     tabs: RefCell<Vec<Rc<Tab>>>,
     active: Cell<Option<usize>>,
     on_status: RefCell<Option<Rc<dyn Fn(Option<Status>)>>>,
+    on_reload: RefCell<Option<Rc<dyn Fn()>>>,
+    git: RefCell<Rc<crate::git::Status>>,
     me: RefCell<Weak<EditorGroup>>,
 }
 
@@ -122,6 +124,8 @@ impl EditorGroup {
             tabs: RefCell::new(Vec::new()),
             active: Cell::new(None),
             on_status: RefCell::new(None),
+            on_reload: RefCell::new(None),
+            git: RefCell::new(Rc::new(crate::git::Status::default())),
             me: RefCell::new(Weak::new()),
         });
         *group.me.borrow_mut() = Rc::downgrade(&group);
@@ -187,6 +191,34 @@ impl EditorGroup {
         *self.on_status.borrow_mut() = Some(f);
     }
 
+    /// Called when an open file changed on disk and was reloaded.
+    pub fn set_on_reload(&self, f: Rc<dyn Fn()>) {
+        *self.on_reload.borrow_mut() = Some(f);
+    }
+
+    /// Git decoration colors on tab titles, like VS Code.
+    pub fn set_git(&self, st: &Rc<crate::git::Status>) {
+        *self.git.borrow_mut() = st.clone();
+        for t in self.tabs.borrow().iter() {
+            self.decorate_tab(t);
+        }
+    }
+
+    fn decorate_tab(&self, t: &Tab) {
+        for c in crate::git::Kind::ALL_CSS {
+            t.widget.remove_css_class(c);
+        }
+        if let Some(k) = self.git.borrow().kind(&t.view.path(), false) {
+            t.widget.add_css_class(k.css());
+        }
+    }
+
+    pub fn refresh_git_markers(&self) {
+        for v in self.views() {
+            v.refresh_git();
+        }
+    }
+
     pub fn status(&self) -> Option<Status> {
         let tab = self.active_tab()?;
         let (line, col) = tab.view.cursor();
@@ -245,6 +277,7 @@ impl EditorGroup {
         };
         self.stack.add_child(&tab.view.widget);
         tab.view.open(path.to_path_buf());
+        self.decorate_tab(&tab);
         self.activate(idx);
     }
 
@@ -291,6 +324,12 @@ impl EditorGroup {
         });
         tab.widget.add_controller(click);
 
+        let me = self.me.borrow().clone();
+        tab.view.set_on_reload(Rc::new(move || {
+            if let Some(f) = me.upgrade().and_then(|g| g.on_reload.borrow().clone()) {
+                f();
+            }
+        }));
         let me = self.me.borrow().clone();
         let weak_tab = Rc::downgrade(&tab);
         tab.view.set_notify(Rc::new(move || {

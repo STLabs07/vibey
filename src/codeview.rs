@@ -37,8 +37,19 @@ pub struct ViewStyle {
     pub changed: Rgba,
     pub find_match: Rgba,
     pub find_current: Rgba,
+    pub git_added: Rgba,
+    pub git_modified: Rgba,
+    pub git_deleted: Rgba,
     pub scale: f64,
 }
+
+/// Gutter marker per line, vs the git index (what VS Code's quick diff shows).
+pub const MARK_ADDED: u8 = 1;
+pub const MARK_MODIFIED: u8 = 2;
+/// Lines were deleted below this line.
+pub const MARK_DELETED_BELOW: u8 = 3;
+/// Lines were deleted above the first line.
+pub const MARK_DELETED_ABOVE: u8 = 4;
 
 pub type SharedStyle = Rc<RefCell<ViewStyle>>;
 
@@ -52,6 +63,11 @@ mod imp {
         pub number_right: Cell<i32>,
         pub text_top: Cell<i32>,
         pub color: RefCell<Option<gtk::gdk::RGBA>>,
+        pub markers: RefCell<Vec<u8>>,
+        /// added, modified, deleted
+        pub marker_colors: RefCell<Vec<gtk::gdk::RGBA>>,
+        pub marker_x: Cell<f32>,
+        pub marker_w: Cell<f32>,
     }
 
     #[glib::object_subclass]
@@ -85,12 +101,26 @@ mod imp {
             let (mut iter, _) = view.line_at_y(visible.y());
             let bottom = visible.y() + visible.height();
             let right = self.number_right.get();
+            let markers = self.markers.borrow();
+            let mc = self.marker_colors.borrow();
+            let (mx, mw) = (self.marker_x.get(), self.marker_w.get());
+            let has_colors = mc.len() == 3;
             loop {
-                let (y, _h) = view.line_yrange(&iter);
+                let (y, h) = view.line_yrange(&iter);
                 if y > bottom {
                     break;
                 }
                 let (_, wy) = view.buffer_to_window_coords(gtk::TextWindowType::Left, 0, y);
+                let (fy, fh) = (wy as f32, h as f32);
+                match markers.get(iter.line() as usize).copied().filter(|_| has_colors).unwrap_or(0) {
+                    MARK_ADDED => snapshot.append_color(&mc[0], &graphene::Rect::new(mx, fy, mw, fh)),
+                    MARK_MODIFIED => snapshot.append_color(&mc[1], &graphene::Rect::new(mx, fy, mw, fh)),
+                    MARK_DELETED_BELOW => {
+                        snapshot.append_color(&mc[2], &graphene::Rect::new(mx, fy + fh - mw, mw * 2.5, mw * 1.5))
+                    }
+                    MARK_DELETED_ABOVE => snapshot.append_color(&mc[2], &graphene::Rect::new(mx, fy, mw * 2.5, mw * 1.5)),
+                    _ => {}
+                }
                 layout.set_text(&(iter.line() + 1).to_string());
                 let (_, logical) = layout.pixel_extents();
                 snapshot.save();
@@ -122,9 +152,14 @@ enum Content {
     Error(String),
 }
 
+/// The file's index version, cached until the index changes.
+type Base = Option<(std::time::SystemTime, Arc<str>)>;
+
 struct Loaded {
     content: Content,
     hl: Option<Highlighted>,
+    markers: Vec<u8>,
+    base: Base,
     /// Line diff old → new: (tag, old lines, new lines), for reloads.
     ops: Vec<(DiffTag, Range<usize>, Range<usize>)>,
 }
@@ -146,10 +181,47 @@ fn read(path: &Path) -> Content {
     }
 }
 
-/// Read + highlight (+ diff against `old`), on a worker thread.
-fn load(path: &Path, old: Option<Arc<str>>, theme_id: &str, brackets: &BracketColors) -> Loaded {
+/// Line markers of `text` vs `base` (both whole files).
+fn line_markers(base: &str, text: &str) -> Vec<u8> {
+    let a: Vec<&str> = base.split_inclusive('\n').collect();
+    let b: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut marks = vec![0u8; b.len().max(1)];
+    let deadline = Instant::now() + Duration::from_millis(150);
+    for op in similar::capture_diff_slices_deadline(Algorithm::Myers, &a, &b, Some(deadline)) {
+        let (tag, _old, new) = op.as_tag_tuple();
+        match tag {
+            DiffTag::Insert => marks[new.clone()].fill(MARK_ADDED),
+            DiffTag::Replace => marks[new.clone()].fill(MARK_MODIFIED),
+            DiffTag::Delete if new.start == 0 => marks[0] = marks[0].max(MARK_DELETED_ABOVE),
+            DiffTag::Delete => {
+                let i = (new.start - 1).min(marks.len() - 1);
+                if marks[i] == 0 {
+                    marks[i] = MARK_DELETED_BELOW;
+                }
+            }
+            _ => {}
+        }
+    }
+    marks
+}
+
+/// The index version of `path`, reusing `cached` while the index is unchanged.
+fn index_base(path: &Path, cached: Base) -> Base {
+    let stamp = crate::git::index_stamp(path)?;
+    match cached {
+        Some((t, text)) if t == stamp => Some((t, text)),
+        _ => crate::git::index_content(path).map(|t| (stamp, t.into())),
+    }
+}
+
+/// Read + highlight (+ diff against `old`, + git markers), on a worker thread.
+fn load(path: &Path, old: Option<Arc<str>>, theme_id: &str, brackets: &BracketColors, base: Base) -> Loaded {
     let content = read(path);
-    let Content::Text(text) = &content else { return Loaded { content, hl: None, ops: Vec::new() } };
+    let Content::Text(text) = &content else {
+        return Loaded { content, hl: None, markers: Vec::new(), base, ops: Vec::new() };
+    };
+    let base = index_base(path, base);
+    let markers = base.as_ref().map(|(_, b)| line_markers(b, text)).unwrap_or_default();
     let ops = match old {
         Some(old) if *old != **text => {
             let a: Vec<&str> = old.split_inclusive('\n').collect();
@@ -164,7 +236,29 @@ fn load(path: &Path, old: Option<Arc<str>>, theme_id: &str, brackets: &BracketCo
         _ => Vec::new(),
     };
     let hl = highlight::highlight(text, path, theme_id, brackets);
-    Loaded { content, hl: Some(hl), ops }
+    Loaded { content, hl: Some(hl), markers, base, ops }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markers_like_vscode() {
+        let base = "a\nb\nc\nd\n";
+        let text = "a\nB\nc\nnew\n"; // b modified, d deleted then a line added in its place
+        let m = line_markers(base, text);
+        assert_eq!(m[0], 0);
+        assert_eq!(m[1], MARK_MODIFIED);
+        assert_eq!(m[2], 0);
+        assert_eq!(m[3], MARK_MODIFIED);
+        let m = line_markers("a\nb\n", "a\nb\nc\n");
+        assert_eq!(m, vec![0, 0, MARK_ADDED]);
+        let m = line_markers("a\nb\nc\n", "a\nc\n");
+        assert_eq!(m, vec![MARK_DELETED_BELOW, 0]);
+        let m = line_markers("x\na\n", "a\n");
+        assert_eq!(m, vec![MARK_DELETED_ABOVE]);
+    }
 }
 
 #[derive(Default)]
@@ -195,6 +289,8 @@ pub struct CodeView {
     monitor: RefCell<Option<gio::FileMonitor>>,
     reload_pending: Cell<bool>,
     notify: RefCell<Option<Rc<dyn Fn()>>>,
+    on_reload: RefCell<Option<Rc<dyn Fn()>>>,
+    base: RefCell<Base>,
 }
 
 impl CodeView {
@@ -241,6 +337,8 @@ impl CodeView {
             monitor: RefCell::new(None),
             reload_pending: Cell::new(false),
             notify: RefCell::new(None),
+            on_reload: RefCell::new(None),
+            base: RefCell::new(None),
         });
         cv.apply_colors();
         let weak = Rc::downgrade(&cv);
@@ -268,6 +366,11 @@ impl CodeView {
         if let Some(f) = f {
             f();
         }
+    }
+
+    /// Called after the file changed on disk and was reloaded.
+    pub fn set_on_reload(&self, f: Rc<dyn Fn()>) {
+        *self.on_reload.borrow_mut() = Some(f);
     }
 
     pub fn path(&self) -> PathBuf {
@@ -331,6 +434,7 @@ impl CodeView {
     fn apply_colors(&self) {
         let s = self.style.borrow();
         *self.gutter.imp().color.borrow_mut() = Some(s.line_number.gdk());
+        *self.gutter.imp().marker_colors.borrow_mut() = vec![s.git_added.gdk(), s.git_modified.gdk(), s.git_deleted.gdk()];
         self.find_tag.set_background_rgba(Some(&s.find_match.gdk()));
         self.find_current_tag.set_background_rgba(Some(&s.find_current.gdk()));
         self.gutter.queue_draw();
@@ -359,6 +463,9 @@ impl CodeView {
         // VS Code: line numbers (min 5 digits) | decorations + folding (26).
         let numbers = digits * digit;
         gi.number_right.set(numbers.round() as i32);
+        // VS Code puts the quick-diff bar just right of the line numbers.
+        gi.marker_x.set((numbers + 5.0 * scale) as f32);
+        gi.marker_w.set((3.0 * scale) as f32);
         gi.width.set((numbers + 26.0 * scale).round() as i32);
         gi.text_top.set(extra / 2);
         self.gutter.queue_resize();
@@ -396,6 +503,27 @@ impl CodeView {
         *self.monitor.borrow_mut() = Some(monitor);
     }
 
+    /// Recompute gutter markers (the git index changed: stage, commit, checkout).
+    pub fn refresh_git(self: &Rc<Self>) {
+        let Some(text) = self.text.borrow().clone() else { return };
+        let path = self.path();
+        let cached = self.base.borrow().clone();
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let res = gio::spawn_blocking(move || {
+                let base = index_base(&path, cached);
+                let markers = base.as_ref().map(|(_, b)| line_markers(b, &text)).unwrap_or_default();
+                (base, markers)
+            })
+            .await;
+            if let Ok((base, markers)) = res {
+                *this.base.borrow_mut() = base;
+                *this.gutter.imp().markers.borrow_mut() = markers;
+                this.gutter.queue_draw();
+            }
+        });
+    }
+
     /// Re-highlight with the current style (after a theme change).
     pub fn restyle(self: &Rc<Self>) {
         let table = self.view.buffer().tag_table();
@@ -417,11 +545,18 @@ impl CodeView {
             let s = self.style.borrow();
             (s.theme_id.clone(), s.brackets.clone())
         };
+        let base = self.base.borrow().clone();
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let loaded = gio::spawn_blocking(move || load(&path, old, &theme_id, &brackets))
+            let loaded = gio::spawn_blocking(move || load(&path, old, &theme_id, &brackets, base))
                 .await
-                .unwrap_or_else(|_| Loaded { content: Content::Error("loader panicked".into()), hl: None, ops: vec![] });
+                .unwrap_or_else(|_| Loaded {
+                    content: Content::Error("loader panicked".into()),
+                    hl: None,
+                    markers: vec![],
+                    base: None,
+                    ops: vec![],
+                });
             if this.load_id.get() == id {
                 this.finish_load(loaded, is_reload);
             }
@@ -455,6 +590,9 @@ impl CodeView {
             }
         };
 
+        *self.base.borrow_mut() = loaded.base;
+        *self.gutter.imp().markers.borrow_mut() = loaded.markers;
+        self.gutter.queue_draw();
         let old = self.text.replace(Some(text.clone()));
         let unchanged = old.as_deref() == Some(&*text);
         let mut changed_lines = Vec::new();
@@ -484,6 +622,12 @@ impl CodeView {
         }
         self.apply_metrics();
         self.emit();
+        if is_reload {
+            let f = self.on_reload.borrow().clone();
+            if let Some(f) = f {
+                f();
+            }
+        }
         // Highlighting allocates a lot transiently; give it back to the OS.
         glib::idle_add_local_once(|| unsafe {
             libc::malloc_trim(0);

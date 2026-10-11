@@ -169,6 +169,28 @@ gutter { background-color: @vs_editor_background; }
 .term-tab.attention { color: @vs_panelTitle_activeForeground; }
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.25; } 100% { opacity: 1; } }
 
+/* git decorations (explorer rows, tabs) */
+.git-badge { margin: 0 {{12}} 0 {{4}}; font-size: {{~12}}; }
+.git-modified, .git-modified label { color: @vs_gitDecoration_modifiedResourceForeground; }
+.git-untracked, .git-untracked label { color: @vs_gitDecoration_untrackedResourceForeground; }
+.git-added, .git-added label { color: @vs_gitDecoration_addedResourceForeground; }
+.git-deleted, .git-deleted label { color: @vs_gitDecoration_deletedResourceForeground; }
+.git-conflict, .git-conflict label { color: @vs_gitDecoration_conflictingResourceForeground; }
+.git-ignored, .git-ignored label { color: @vs_gitDecoration_ignoredResourceForeground; }
+.git-ignored label.seti { opacity: 0.6; }
+listview.tree > row:selected .git-badge { color: inherit; }
+.tab.git-modified .tab-label { color: @vs_gitDecoration_modifiedResourceForeground; }
+.tab.git-untracked .tab-label { color: @vs_gitDecoration_untrackedResourceForeground; }
+.tab.git-added .tab-label { color: @vs_gitDecoration_addedResourceForeground; }
+.tab.git-conflict .tab-label { color: @vs_gitDecoration_conflictingResourceForeground; }
+.rail .dirty {
+  min-width: {{6}}; min-height: {{6}};
+  margin: 0 {{-2}} {{-2}} 0;
+  border-radius: 50%;
+  opacity: 0;
+}
+.rail .dirty.on { opacity: 1; background: @vs_gitDecoration_modifiedResourceForeground; box-shadow: 0 0 0 {{2}} @vs_activityBar_background; }
+
 /* rail badges: running = pulsing ring, attention = filled dot */
 .rail .badge {
   min-width: {{8}}; min-height: {{8}};

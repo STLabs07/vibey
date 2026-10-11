@@ -1,7 +1,7 @@
 //! One open project: its explorer, editor group, terminals and file index.
 //! Everything stays alive while the project is in the background.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -14,7 +14,8 @@ use crate::editor::EditorGroup;
 use crate::icons::{self, codicon};
 use crate::quickopen::{self, Item, Provider, QuickPick};
 use crate::terminal::TerminalPanel;
-use crate::{fuzzy, tree};
+use crate::tree::Tree;
+use crate::{fuzzy, git};
 
 /// Directories skipped when indexing a folder that isn't a git repository.
 const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "venv", "__pycache__", ".cache", ".next", "dist"];
@@ -32,6 +33,14 @@ pub struct Project {
     ignored: RefCell<Arc<Vec<String>>>,
     indexing: Cell<bool>,
     recent: RefCell<Vec<PathBuf>>,
+    tree: OnceCell<Rc<Tree>>,
+    pub git: RefCell<Rc<git::Status>>,
+    git_timer: Cell<bool>,
+    git_busy: Cell<bool>,
+    git_again: Cell<bool>,
+    index_stamp: Cell<Option<std::time::SystemTime>>,
+    git_monitor: RefCell<Option<gio::FileMonitor>>,
+    on_git: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 impl Project {
@@ -69,6 +78,14 @@ impl Project {
             ignored: RefCell::new(Arc::new(Vec::new())),
             indexing: Cell::new(false),
             recent: RefCell::new(Vec::new()),
+            tree: OnceCell::new(),
+            git: RefCell::new(Rc::new(git::Status::default())),
+            git_timer: Cell::new(false),
+            git_busy: Cell::new(false),
+            git_again: Cell::new(false),
+            index_stamp: Cell::new(None),
+            git_monitor: RefCell::new(None),
+            on_git: RefCell::new(None),
         });
 
         // Explorer
@@ -85,17 +102,109 @@ impl Project {
         section.append(&chevron);
         section.append(&gtk::Label::new(Some(&project.name)));
         sidebar.append(&section);
-        let weak = Rc::downgrade(&project);
-        sidebar.append(&tree::build(
+        let (w1, w2) = (Rc::downgrade(&project), Rc::downgrade(&project));
+        let tree = Tree::new(
             root,
             Rc::new(move |path, pin| {
-                if let Some(p) = weak.upgrade() {
+                if let Some(p) = w1.upgrade() {
                     p.open_file(&path, pin);
                 }
             }),
-        ));
+            Rc::new(move || {
+                if let Some(p) = w2.upgrade() {
+                    p.refresh_git();
+                }
+            }),
+        );
+        sidebar.append(&tree.widget);
+        let _ = project.tree.set(tree);
         project.page.set_start_child(Some(&sidebar));
+        let weak = Rc::downgrade(&project);
+        project.editor.set_on_reload(Rc::new(move || {
+            if let Some(p) = weak.upgrade() {
+                p.refresh_git();
+            }
+        }));
+        project.refresh_git();
         project
+    }
+
+    pub fn set_on_git(&self, f: Rc<dyn Fn()>) {
+        *self.on_git.borrow_mut() = Some(f);
+    }
+
+    /// Debounced `git status`; at most one runs at a time.
+    pub fn refresh_git(self: &Rc<Self>) {
+        if self.git_timer.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
+            if let Some(p) = weak.upgrade() {
+                p.git_timer.set(false);
+                p.run_git();
+            }
+        });
+    }
+
+    fn run_git(self: &Rc<Self>) {
+        if self.git_busy.replace(true) {
+            self.git_again.set(true);
+            return;
+        }
+        let root = self.root.clone();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let res = gio::spawn_blocking(move || {
+                let st = git::status(&root);
+                let stamp = git::index_stamp(&root);
+                (st, stamp)
+            })
+            .await;
+            let Some(p) = weak.upgrade() else { return };
+            p.git_busy.set(false);
+            if let Ok((st, stamp)) = res {
+                let st = Rc::new(st);
+                if st.is_repo() && p.git_monitor.borrow().is_none() {
+                    p.watch_git_dir(&st.toplevel);
+                }
+                if let Some(t) = p.tree.get() {
+                    t.set_status(st.clone());
+                }
+                p.editor.set_git(&st);
+                if p.index_stamp.replace(stamp) != stamp {
+                    p.editor.refresh_git_markers();
+                }
+                *p.git.borrow_mut() = st;
+                let f = p.on_git.borrow().clone();
+                if let Some(f) = f {
+                    f();
+                }
+            }
+            if p.git_again.take() {
+                p.refresh_git();
+            }
+        });
+    }
+
+    /// Commits, staging, checkouts and branch switches all touch files directly in `.git`.
+    fn watch_git_dir(self: &Rc<Self>, toplevel: &Path) {
+        let Some(dir) = git::git_dir(toplevel) else { return };
+        let Ok(m) = gio::File::for_path(dir).monitor_directory(gio::FileMonitorFlags::NONE, None::<&gio::Cancellable>)
+        else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        m.connect_changed(move |_, file, _, _| {
+            // Lock files come and go during every git command; the real files follow.
+            if file.basename().is_some_and(|n| n.to_string_lossy().ends_with(".lock")) {
+                return;
+            }
+            if let Some(p) = weak.upgrade() {
+                p.refresh_git();
+            }
+        });
+        *self.git_monitor.borrow_mut() = Some(m);
     }
 
     pub fn open_file(&self, path: &Path, pin: bool) {

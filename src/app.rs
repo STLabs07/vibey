@@ -188,6 +188,9 @@ impl App {
             changed: theme::Rgba { r: 0, g: 0, b: 0, a: 0 },
             find_match: theme::Rgba { r: 0, g: 0, b: 0, a: 0 },
             find_current: theme::Rgba { r: 0, g: 0, b: 0, a: 0 },
+            git_added: theme::Rgba { r: 0, g: 0, b: 0, a: 0 },
+            git_modified: theme::Rgba { r: 0, g: 0, b: 0, a: 0 },
+            git_deleted: theme::Rgba { r: 0, g: 0, b: 0, a: 0 },
             scale,
         }));
 
@@ -231,9 +234,14 @@ impl App {
         });
         gear.set_popover(Some(&app_rc.settings_popover()));
         let me = Rc::downgrade(&app_rc);
-        app_rc.window.connect_is_active_notify(move |_| {
+        app_rc.window.connect_is_active_notify(move |w| {
             if let Some(a) = me.upgrade() {
                 a.update_visibility();
+                if w.is_active() {
+                    if let Some(p) = a.active_project() {
+                        p.refresh_git();
+                    }
+                }
             }
         });
         app_rc.install_shortcuts();
@@ -304,6 +312,16 @@ impl App {
                 a.on_terminal_event(&p, ev);
             }
         }));
+        let me = Rc::downgrade(self);
+        let weak_p = Rc::downgrade(&project);
+        project.set_on_git(Rc::new(move || {
+            if let (Some(a), Some(p)) = (me.upgrade(), weak_p.upgrade()) {
+                a.update_badges();
+                if a.active_project().is_some_and(|ap| Rc::ptr_eq(&ap, &p)) {
+                    a.show_branch(&p);
+                }
+            }
+        }));
 
         let n = self.projects.borrow().len();
         let item = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -316,9 +334,14 @@ impl App {
         badge.set_halign(gtk::Align::End);
         badge.set_valign(gtk::Align::Start);
         badge.set_can_target(false);
+        let dirty = label("", "dirty");
+        dirty.set_halign(gtk::Align::End);
+        dirty.set_valign(gtk::Align::End);
+        dirty.set_can_target(false);
         let holder = gtk::Overlay::new();
         holder.set_child(Some(&avatar));
         holder.add_overlay(&badge);
+        holder.add_overlay(&dirty);
         holder.set_halign(gtk::Align::Center);
         holder.set_valign(gtk::Align::Center);
         holder.set_vexpand(true);
@@ -367,7 +390,8 @@ impl App {
             project.terminals.add_terminal(&current_theme());
         }
         self.update_status();
-        self.refresh_branch(&project);
+        self.show_branch(&project);
+        project.refresh_git();
     }
 
     /// Start the active project's terminal once the window exists (see main: GSK_RENDERER).
@@ -504,6 +528,8 @@ impl App {
     // ---- terminal status → rail badges, title, notifications ----
 
     fn on_terminal_event(self: &Rc<Self>, project: &Rc<Project>, ev: crate::terminal::Event) {
+        // Terminal activity (an AI CLI working, a command finishing) usually means files changed.
+        project.refresh_git();
         if let crate::terminal::Event::Finished(job) = &ev {
             let unfocused = !self.window.is_active();
             if unfocused && self.config.borrow().notifications {
@@ -533,18 +559,28 @@ impl App {
         for (p, item) in self.projects.borrow().iter() {
             let (running, attention, job) = p.terminals.summary();
             attention_anywhere |= attention;
-            let Some(badge) = item
-                .first_child()
-                .and_downcast::<gtk::Overlay>()
-                .and_then(|o| o.last_child())
-                .and_downcast::<gtk::Label>()
-            else {
+            // holder overlay: avatar, badge, dirty
+            let Some(holder) = item.first_child().and_downcast::<gtk::Overlay>() else { continue };
+            let Some(badge) = holder.first_child().and_then(|a| a.next_sibling()).and_downcast::<gtk::Label>() else {
                 continue;
             };
+            if let Some(dirty) = badge.next_sibling() {
+                let n = p.git.borrow().changed();
+                if n > 0 { dirty.add_css_class("on") } else { dirty.remove_css_class("on") }
+            }
             for c in ["running", "attention"] {
                 badge.remove_css_class(c);
             }
             let mut tip = format!("{}\n{}", p.name, p.root.display());
+            {
+                let st = p.git.borrow();
+                if let Some(b) = &st.branch {
+                    tip.push_str(&format!("\n⎇ {b}"));
+                    if st.changed() > 0 {
+                        tip.push_str(&format!(" · {} changed", st.changed()));
+                    }
+                }
+            }
             if attention {
                 badge.add_css_class("attention");
                 tip.push_str(&format!("\n● {} finished", job.unwrap_or_default()));
@@ -598,36 +634,26 @@ impl App {
         }
     }
 
-    fn refresh_branch(self: &Rc<Self>, project: &Rc<Project>) {
-        let root = project.root.clone();
-        let me = Rc::downgrade(self);
-        let weak_p = Rc::downgrade(project);
-        glib::spawn_future_local(async move {
-            let branch = gio::spawn_blocking(move || {
-                std::process::Command::new("git")
-                    .args(["--no-optional-locks", "rev-parse", "--abbrev-ref", "HEAD"])
-                    .current_dir(&root)
-                    .stderr(std::process::Stdio::null())
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            })
-            .await
-            .ok()
-            .flatten();
-            let (Some(a), Some(p)) = (me.upgrade(), weak_p.upgrade()) else { return };
-            if a.active_project().is_some_and(|ap| Rc::ptr_eq(&ap, &p)) {
-                match branch {
-                    Some(b) => a.status_branch.set_markup(&format!(
-                        "<span font_family=\"codicon\">{}</span> {}",
-                        codicon::GIT_BRANCH,
-                        glib::markup_escape_text(&b)
-                    )),
-                    None => a.status_branch.set_text(""),
-                }
-            }
-        });
+    /// VS Code's status bar: `⎇ main*` (dirty) and `↓1 ↑2` (behind/ahead of upstream).
+    fn show_branch(&self, project: &Rc<Project>) {
+        let st = project.git.borrow().clone();
+        let Some(branch) = st.branch.clone().or_else(|| st.is_repo().then(|| "(detached)".to_string())) else {
+            self.status_branch.set_text("");
+            return;
+        };
+        let dirty = if st.changed() > 0 { "*" } else { "" };
+        let mut sync = String::new();
+        if st.behind > 0 {
+            sync.push_str(&format!(" ↓{}", st.behind));
+        }
+        if st.ahead > 0 {
+            sync.push_str(&format!(" ↑{}", st.ahead));
+        }
+        self.status_branch.set_markup(&format!(
+            "<span font_family=\"codicon\">{}</span> {}{dirty}{sync}",
+            codicon::GIT_BRANCH,
+            glib::markup_escape_text(&branch)
+        ));
     }
 
     // ---- themes ----
@@ -647,6 +673,9 @@ impl App {
             st.changed = model.get("diffEditor.insertedLineBackground");
             st.find_match = model.get("editor.findMatchHighlightBackground");
             st.find_current = model.get("editor.findMatchBackground");
+            st.git_added = model.get("editorGutter.addedBackground");
+            st.git_modified = model.get("editorGutter.modifiedBackground");
+            st.git_deleted = model.get("editorGutter.deletedBackground");
         }
         THEME.with(|t| *t.borrow_mut() = Some(model.clone()));
         for (p, _) in self.projects.borrow().iter() {

@@ -92,6 +92,7 @@ const DARK_DEFAULTS: &[(&str, &str)] = &[
     ("gitDecoration.addedResourceForeground", "#81B88B"),
     ("gitDecoration.deletedResourceForeground", "#C74E39"),
     ("gitDecoration.ignoredResourceForeground", "#8C8C8C"),
+    ("gitDecoration.conflictingResourceForeground", "#E4676B"),
     ("editorGutter.addedBackground", "#2EA043"),
     ("editorGutter.modifiedBackground", "#0078D4"),
     ("editorGutter.deletedBackground", "#F85149"),
@@ -151,6 +152,7 @@ const LIGHT_DEFAULTS: &[(&str, &str)] = &[
     ("gitDecoration.addedResourceForeground", "#587C0C"),
     ("gitDecoration.deletedResourceForeground", "#AD0707"),
     ("gitDecoration.ignoredResourceForeground", "#8E8E90"),
+    ("gitDecoration.conflictingResourceForeground", "#AD0707"),
     ("editorGutter.addedBackground", "#2EA043"),
     ("editorGutter.modifiedBackground", "#005FB8"),
     ("editorGutter.deletedBackground", "#F85149"),
@@ -226,6 +228,12 @@ const CSS_KEYS: &[&str] = &[
     "button.foreground",
     "badge.background",
     "badge.foreground",
+    "gitDecoration.modifiedResourceForeground",
+    "gitDecoration.untrackedResourceForeground",
+    "gitDecoration.addedResourceForeground",
+    "gitDecoration.deletedResourceForeground",
+    "gitDecoration.conflictingResourceForeground",
+    "gitDecoration.ignoredResourceForeground",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

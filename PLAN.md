@@ -175,3 +175,26 @@ armed by output. An idle terminal costs no wakeups.
 Verified headlessly: busy script → running badge, switch away → "finished" dot on that project,
 switch back → cleared, `sleep` shows as the tab name.
 Memory, target scenario: 96.6 MB GPU / 73.3 MB software. Startup is 293 ms median.
+
+## Phase 3 results (2026-10-11)
+
+`git.rs` runs `git --no-optional-locks status --porcelain=v2 --branch -z --ignored=matching`
+off the UI thread, debounced 300 ms, one at a time. Refresh triggers are events only (no timers):
+- anything in `.git/` changes (commit, stage, checkout; `*.lock` churn is ignored)
+- an open file reloads
+- a terminal starts or stops being busy
+- an expanded folder's contents change
+- the window regains focus
+
+Decorations:
+- **Explorer:** VS Code colors plus M/U/A/D/R letters. Folders take their loudest child and
+  show `•`. Ignored paths are dimmed (`node_modules/` comes back as one entry, so it's cheap).
+- **Tabs:** title colored by status.
+- **Gutter:** added/modified bars and deleted wedges, diffed against the *index* like VS Code's
+  quick diff (staging clears them). The index copy is cached by `.git/index` mtime.
+- **Status bar:** `⎇ main*` plus `↓n ↑n`.
+- **Rail:** a dirty dot on the avatar; branch and change count in the tooltip.
+
+Verified headlessly on a scratch repo: gutter bars on changed lines, tree colors, `main*`, rail
+dot, tab color; `git add -A` cleared the gutter about 1.5 s later via the `.git` watch.
+Memory, target scenario: 97.6 MB GPU / 73.3 MB software.

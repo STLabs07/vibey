@@ -8,9 +8,9 @@ seventh of the memory.
 Linux only. Rust + GTK4 + VTE. MIT licensed. See [SPEC.md](SPEC.md) for scope and
 [PLAN.md](PLAN.md) for architecture and measurements.
 
-> Status: **Phases 1–2 done** (projects, tabs, live reload, file finder, find, themes,
-> terminal naming + "finished" badges). Coming next: git decorations, resource panel,
-> `vibey .` single instance, session restore.
+> Status: **Phases 1–3 done** (projects, tabs, live reload, file finder, find, themes,
+> terminal naming + "finished" badges, git decorations). Coming next: resource panel,
+> `vibey .` single instance, session restore, packaging.
 
 ## Build
 
@@ -51,6 +51,11 @@ Terminal tabs are named after what's running in them. A project's rail avatar sh
 ring while one of its terminals is working, and a blue dot when one finished while you were
 looking elsewhere, e.g. "Claude finished in project B" while you're in project A. When Vibey
 isn't focused, you also get a desktop notification.
+
+Git status shows the way VS Code shows it: colored tree entries with M/U/A letters, gutter
+bars against the staged version, `main*` and ↓/↑ in the status bar, and a dirty dot on the
+project's rail avatar. Vibey only ever runs `git --no-optional-locks …`, so it never blocks
+your AI CLI's commits.
 
 Click in the tree opens a preview tab (italic, replaced by the next click). Double-click pins it.
 When a file changes on disk, its tab updates in place and the changed lines flash, then fade.

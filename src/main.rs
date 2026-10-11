@@ -3,6 +3,7 @@ mod codeview;
 mod config;
 mod editor;
 mod fuzzy;
+mod git;
 mod highlight;
 mod icons;
 mod project;
