@@ -30,6 +30,7 @@ pub mod codicon {
     pub const CIRCLE_FILLED: &str = "\u{ea71}";
     pub const PULSE: &str = "\u{eb31}";
     pub const SEARCH: &str = "\u{ea6d}";
+    pub const WARNING: &str = "\u{ea6c}";
 }
 const SETI_MAP: &str = include_str!("../assets/icons/vs-seti-icon-theme.json");
 

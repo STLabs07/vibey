@@ -6,7 +6,7 @@
 //!
 //! Commands: `term TEXT` (typed into the shown terminal + Enter), `wait MS`, `key SPEC` (e.g. ctrl+shift+grave), `type TEXT` (quick pick or
 //! find box), `enter`, `down`, `escape`, `find TEXT`, `project N`, `theme ID`,
-//! `exec SHELL…`, `shot FILE`, `mem`, `quit`.
+//! `exec SHELL…`, `shot FILE`, `mem`, `close`, `answer yes|no`, `hover N`, `quit`.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -74,6 +74,15 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
         }
         "project" => app.activate(arg.parse::<usize>().unwrap_or(1).saturating_sub(1)),
         "theme" => app.apply_theme(arg, false),
+        // Ask the window to close (shows the confirmation if terminals are busy).
+        "close" => {
+            app.window.close();
+            eprintln!("selftest: confirm open={}", crate::dialog::is_open());
+        }
+        "answer" => {
+            crate::dialog::answer(arg == "yes");
+            eprintln!("selftest: confirm open={}", crate::dialog::is_open());
+        }
         "hover" => app.hover_rail(arg.parse().unwrap_or(1)),
         "exec" => {
             let ok = std::process::Command::new("sh").args(["-c", arg]).status().is_ok_and(|s| s.success());

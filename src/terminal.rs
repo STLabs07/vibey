@@ -500,20 +500,12 @@ impl TerminalPanel {
         match job {
             None => do_kill(),
             Some(job) => {
-                let dialog = gtk::AlertDialog::builder()
-                    .message(format!("Kill terminal running {job}?"))
-                    .detail("The process will be stopped.")
-                    .buttons(["Cancel", "Kill Terminal"])
-                    .cancel_button(0)
-                    .default_button(0)
-                    .modal(true)
-                    .build();
-                let root = self.widget.root().and_downcast::<gtk::Window>();
-                dialog.choose(root.as_ref(), None::<&gio::Cancellable>, move |res| {
-                    if res == Ok(1) {
-                        do_kill();
-                    }
-                });
+                crate::dialog::confirm(
+                    &format!("Kill terminal running {job}?"),
+                    "The process will be stopped.",
+                    "Kill Terminal",
+                    do_kill,
+                );
             }
         }
     }

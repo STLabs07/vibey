@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use gtk::prelude::*;
-use gtk::{gio, glib};
+use gtk::glib;
 
 use crate::icons::codicon;
 use crate::procmon::{self, Node, Report};
@@ -268,9 +268,9 @@ impl ResourcePanel {
             kill.add_css_class("codicon");
             kill.set_tooltip_text(Some("Stop process (SIGTERM)"));
             let (me, name) = (self.me.borrow().clone(), name_l.text().to_string());
-            kill.connect_clicked(move |b| {
+            kill.connect_clicked(move |_| {
                 if let Some(p) = me.upgrade() {
-                    p.confirm_kill(b, pid, &name);
+                    p.confirm_kill(pid, &name);
                 }
             });
             self.grid.attach(&kill, 4, *row, 1, 1);
@@ -278,25 +278,19 @@ impl ResourcePanel {
         *row += 1;
     }
 
-    fn confirm_kill(&self, anchor: &gtk::Button, pid: i32, name: &str) {
-        let dialog = gtk::AlertDialog::builder()
-            .message(format!("Stop {name} (PID {pid})?"))
-            .detail("Sends SIGTERM, which lets the process shut down cleanly.")
-            .buttons(["Cancel", "Stop Process"])
-            .cancel_button(0)
-            .default_button(0)
-            .modal(true)
-            .build();
-        let root = anchor.root().and_downcast::<gtk::Window>();
+    fn confirm_kill(&self, pid: i32, name: &str) {
         let me = self.me.borrow().clone();
-        dialog.choose(root.as_ref(), None::<&gio::Cancellable>, move |res| {
-            if res == Ok(1) {
+        crate::dialog::confirm(
+            &format!("Stop {name} (PID {pid})?"),
+            "Sends SIGTERM, which lets the process shut down cleanly.",
+            "Stop Process",
+            move || {
                 unsafe { libc::kill(pid, libc::SIGTERM) };
                 if let Some(f) = me.upgrade().and_then(|p| p.on_killed.borrow().clone()) {
                     glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || f());
                 }
-            }
-        });
+            },
+        );
     }
 }
 

@@ -423,6 +423,36 @@ popover checkbutton { padding: {{2}} {{6}}; }
 .watermark .what { margin-right: {{10}}; padding: {{4}} 0; }
 .watermark .keys { padding: {{4}} 0; opacity: 0.9; }
 
+/* ---- confirmation dialog (in-window; see dialog.rs) ---- */
+.dialog-scrim { background-color: alpha(#000000, 0.35); }
+.dialog-card {
+  padding: {{18}} {{20}} {{14}} {{16}};
+  background-color: @vs_editorWidget_background;
+  color: @vs_foreground;
+  border: 1px solid @vs_editorWidget_border;
+  border-radius: {{8}};
+  box-shadow: 0 {{4}} {{24}} 0 @vs_widget_shadow;
+}
+window.vibey .dialog-icon { font-size: {{~28}}; color: #CCA700; margin-right: {{14}}; }
+.dialog-heading { font-weight: 600; font-size: {{~14}}; margin-bottom: {{6}}; }
+window.vibey .dialog-detail { color: @vs_descriptionForeground; }
+.dialog-buttons { margin-top: {{18}}; }
+button.dialog-button {
+  min-height: {{26}};
+  padding: 0 {{14}};
+  margin-left: {{8}};
+  border-radius: {{4}};
+  box-shadow: none;
+  outline: none;
+  background: transparent;
+  color: @vs_foreground;
+  border: 1px solid alpha(@vs_foreground, 0.25);
+}
+button.dialog-button:hover { background-color: @vs_list_hoverBackground; }
+button.dialog-button.primary { background-color: @vs_button_background; color: @vs_button_foreground; border-color: transparent; }
+button.dialog-button.primary:hover { background-color: shade(@vs_button_background, 1.1); }
+button.dialog-button:focus-visible, button.dialog-button:focus { outline: 1px solid @vs_focusBorder; outline-offset: 2px; }
+
 /* ---- quick pick ---- */
 .scrim { background: transparent; }
 .quick-input {

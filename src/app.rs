@@ -51,6 +51,8 @@ pub struct App {
     css: gtk::CssProvider,
     config: RefCell<Config>,
     quick: Rc<QuickPick>,
+    /// Kept alive here; reached through `dialog::confirm`.
+    _confirm: Rc<crate::dialog::Confirm>,
     resources: Rc<ResourcePanel>,
     prev_sample: RefCell<Prev>,
     sampling: Cell<bool>,
@@ -234,6 +236,8 @@ impl App {
         overlay.set_child(Some(&outer));
         overlay.add_overlay(&resources.widget);
         overlay.add_overlay(&quick.widget);
+        let confirm = crate::dialog::Confirm::new(scale, &outer);
+        overlay.add_overlay(&confirm.widget);
         window.set_child(Some(&overlay));
 
         let style = Rc::new(RefCell::new(ViewStyle {
@@ -268,6 +272,7 @@ impl App {
             css,
             config: RefCell::new(cfg),
             quick,
+            _confirm: confirm,
             resources,
             prev_sample: RefCell::new(Prev::default()),
             sampling: Cell::new(false),
@@ -582,19 +587,7 @@ impl App {
     }
 
     fn confirm(&self, heading: &str, body: &str, action: &str, then: impl Fn() + 'static) {
-        let dialog = gtk::AlertDialog::builder()
-            .message(heading)
-            .detail(body)
-            .buttons(["Cancel", action])
-            .cancel_button(0)
-            .default_button(0)
-            .modal(true)
-            .build();
-        dialog.choose(Some(&self.window), None::<&gio::Cancellable>, move |res| {
-            if res == Ok(1) {
-                then();
-            }
-        });
+        crate::dialog::confirm(heading, body, action, then);
     }
 
     fn install_close_guard(self: &Rc<Self>) {
@@ -998,7 +991,7 @@ impl App {
 
     pub fn handle_key(self: &Rc<Self>, key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
         use gtk::gdk::{Key, ModifierType as M};
-        if self.quick.is_open() {
+        if self.quick.is_open() || crate::dialog::is_open() {
             return false;
         }
         if self.resources.is_open() && key == Key::Escape {

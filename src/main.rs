@@ -1,6 +1,7 @@
 mod app;
 mod codeview;
 mod config;
+mod dialog;
 mod editor;
 mod fuzzy;
 mod git;
