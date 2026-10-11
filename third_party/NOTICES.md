@@ -4,6 +4,7 @@
 |---|---|---|---|
 | VS Code default color themes (Dark/Light 2026, Modern, +, VS) | `assets/themes/*.json` | [microsoft/vscode](https://github.com/microsoft/vscode) `extensions/theme-defaults` | MIT, Copyright (c) Microsoft Corporation |
 | Seti file icon theme (font + mapping) | `assets/icons/seti.ttf` (converted from `seti.woff` by `scripts/woff2ttf.py`), `assets/icons/vs-seti-icon-theme.json` | [microsoft/vscode](https://github.com/microsoft/vscode) `extensions/theme-seti`, from [jesseweed/seti-ui](https://github.com/jesseweed/seti-ui) | MIT, see `seti-ThirdPartyNotices.txt` |
+| VS Code markdown grammar | `assets/grammars/markdown.tmLanguage.json` | [microsoft/vscode](https://github.com/microsoft/vscode) `extensions/markdown-basics` | MIT, Copyright (c) Microsoft Corporation |
 | Codicons | `assets/icons/codicon.ttf` | [microsoft/vscode-codicons](https://github.com/microsoft/vscode-codicons) | CC BY 4.0, Copyright (c) Microsoft Corporation |
 | TextMate grammars and community color themes (compiled in through the `irosashi` crate) | n/a (embedded by the dependency) | [shikijs/textmate-grammars-themes](https://github.com/shikijs/textmate-grammars-themes), the same grammars VS Code uses | Each grammar and theme keeps its own license (mostly MIT; see that repository's per-package license files). `irosashi` itself is MIT, Copyright (c) 2026 FrostyBee |
 

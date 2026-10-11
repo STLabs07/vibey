@@ -86,6 +86,30 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
             });
             delay = 2200;
         }
+        "trim" => {
+            unsafe { libc::malloc_trim(0) };
+        }
+        "smaps" => {
+            let mut agg: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+            let mut name = String::new();
+            for line in std::fs::read_to_string("/proc/self/smaps").unwrap_or_default().lines() {
+                let first = line.split_whitespace().next().unwrap_or("");
+                if first.contains('-') && first.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+                    let path = line.split_whitespace().nth(5).unwrap_or("[anon]");
+                    name = path.rsplit('/').next().unwrap_or(path).to_string();
+                    if name.starts_with("libLLVM") {
+                        name = "libLLVM".into();
+                    }
+                } else if let Some(v) = line.strip_prefix("Pss:") {
+                    *agg.entry(name.clone()).or_default() += v.trim().trim_end_matches(" kB").parse::<u64>().unwrap_or(0);
+                }
+            }
+            let mut v: Vec<_> = agg.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            for (n, kb) in v.into_iter().take(8) {
+                eprintln!("selftest:   {:6.1} MB {n}", kb as f64 / 1024.0);
+            }
+        }
         "mem" => {
             let s = std::fs::read_to_string("/proc/self/smaps_rollup").unwrap_or_default();
             let pss = s.lines().find(|l| l.starts_with("Pss:")).unwrap_or("Pss: ?");

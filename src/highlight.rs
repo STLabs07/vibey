@@ -17,7 +17,24 @@ const MAX_LINE_BYTES: usize = 10_000;
 static HIGHLIGHTER: OnceLock<Highlighter> = OnceLock::new();
 
 pub fn highlighter() -> &'static Highlighter {
-    HIGHLIGHTER.get_or_init(|| Highlighter::new().expect("embedded grammars"))
+    HIGHLIGHTER.get_or_init(|| {
+        let h = Highlighter::new().expect("embedded grammars");
+        if let Some(md) = lean_markdown() {
+            let _ = h.load_language("markdown", md);
+        }
+        h
+    })
+}
+
+/// VS Code's markdown grammar with the ~60 embedded fenced-code languages removed
+/// (`highlight` colors fenced blocks itself, loading only the languages present).
+fn lean_markdown() -> Option<Vec<u8>> {
+    let mut g: serde_json::Value =
+        serde_json::from_str(include_str!("../assets/grammars/markdown.tmLanguage.json")).ok()?;
+    g["repository"]["fenced_code_block"]["patterns"] = serde_json::json!([{ "include": "#fenced_code_block_unknown" }]);
+    let repo = g["repository"].as_object_mut()?;
+    repo.retain(|k, _| !k.starts_with("fenced_code_block_") || k == "fenced_code_block_unknown");
+    Some(g.to_string().into_bytes())
 }
 
 /// Initialize the highlighter in the background.
@@ -179,21 +196,87 @@ pub fn highlight(text: &str, path: &Path, theme_id: &str, brackets: &BracketColo
     if text.len() > MAX_HIGHLIGHT_BYTES {
         return out;
     }
-    let mut opts = CodeToTokensOptions::new(&lang, theme_id);
+    let mut table = StyleTable::default();
+    tokens_into(text, &lang, theme_id, brackets, 0, &mut table, &mut out.spans);
+    if lang == "markdown" {
+        // Fenced code is highlighted per block, so only the languages actually used get
+        // loaded (the full markdown grammar embeds ~60 languages: +46 MB).
+        for block in fenced_blocks(text) {
+            out.spans.retain(|s| !(block.lines.contains(&s.line)));
+            tokens_into(&block.code, &block.lang, theme_id, brackets, block.lines.start, &mut table, &mut out.spans);
+        }
+    }
+    out.styles = table.styles;
+    out
+}
+
+struct Fence {
+    lang: String,
+    /// Lines of the code inside the fences.
+    lines: std::ops::Range<u32>,
+    code: String,
+}
+
+/// ```lang … ``` / ~~~lang … ~~~ blocks with a language tag.
+fn fenced_blocks(text: &str) -> Vec<Fence> {
+    let mut out = Vec::new();
+    let mut open: Option<(String, &str, u32, String)> = None; // (lang, fence, first line, code)
+    for (i, line) in text.lines().enumerate() {
+        let i = i as u32;
+        let t = line.trim_start();
+        let indent = line.len() - t.len();
+        match &mut open {
+            Some((lang, fence, first, code)) => {
+                if indent <= 3 && t.trim_end().starts_with(*fence) && t.trim_end().trim_start_matches(fence.chars().next().unwrap()).is_empty() {
+                    let lang = std::mem::take(lang);
+                    out.push(Fence { lang, lines: *first..i, code: std::mem::take(code) });
+                    open = None;
+                } else {
+                    code.push_str(line);
+                    code.push('\n');
+                }
+            }
+            None if indent <= 3 && (t.starts_with("```") || t.starts_with("~~~")) => {
+                let ch = t.chars().next().unwrap();
+                let n = t.chars().take_while(|c| *c == ch).count();
+                let fence = &t[..n];
+                let tag = t[n..].trim().split(|c: char| c.is_whitespace() || c == ',' || c == '{').next().unwrap_or("");
+                let lang = highlighter()
+                    .detect_language(&format!("x.{tag}"))
+                    .or_else(|| highlighter().languages().into_iter().find(|l| l == &tag.to_lowercase()))
+                    .unwrap_or_default();
+                open = Some((lang, fence, i + 1, String::new()));
+            }
+            None => {}
+        }
+    }
+    out.into_iter().filter(|f| !f.lang.is_empty()).collect()
+}
+
+/// Tokenize `text` as `lang` and append styled spans, shifted down by `line_offset`.
+fn tokens_into(
+    text: &str,
+    lang: &str,
+    theme_id: &str,
+    brackets: &BracketColors,
+    line_offset: u32,
+    table: &mut StyleTable,
+    spans: &mut Vec<Span>,
+) {
+    let mut opts = CodeToTokensOptions::new(lang, theme_id);
     opts.include_scopes = true;
     opts.max_line_length = Some(MAX_LINE_BYTES);
-    let Ok(res) = highlighter().code_to_tokens(text, &opts) else { return out };
+    let Ok(res) = highlighter().code_to_tokens(text, &opts) else { return };
 
     let default_fg = Rgba::parse(res.fg());
-    let mut table = StyleTable::default();
     let mut depth = 0usize;
     for (line_no, line) in res.lines.iter().enumerate() {
-        let line_no = line_no as u32;
+        let line_no = line_no as u32 + line_offset;
         let ltext = res.line_text(line);
         let mut push = |table: &mut StyleTable, start: usize, end: usize, style: SpanStyle| {
             if end > start && !ltext[start..end].trim().is_empty() {
                 let id = table.id(style);
-                out.spans.push(Span { line: line_no, start: start as u32, end: end as u32, style: id });
+                spans.push(Span { line: line_no, start: start as u32, end: end as u32, style: id });
             }
         };
         for tok in &line.tokens {
@@ -232,19 +315,17 @@ pub fn highlight(text: &str, path: &Path, theme_id: &str, brackets: &BracketColo
                     };
                     let at = tok.start + i;
                     if let Some(t) = token {
-                        push(&mut table, pos, at, t);
+                        push(table, pos, at, t);
                     }
-                    push(&mut table, at, at + 1, color_only(color));
+                    push(table, at, at + 1, color_only(color));
                     pos = at + 1;
                 }
             }
             if let Some(t) = token {
-                push(&mut table, pos, tok.end, t);
+                push(table, pos, tok.end, t);
             }
         }
     }
-    out.styles = table.styles;
-    out
 }
 
 #[cfg(test)]
@@ -288,6 +369,17 @@ mod tests {
     }
 
     #[test]
+    fn markdown_fences_use_their_language() {
+        let theme = ThemeModel::load(DEFAULT_THEME);
+        let src = "# T\n\n```rust\nfn main() {}\n```\n\ntext (x)\n";
+        let hl = highlight(src, Path::new("a.md"), DEFAULT_THEME, &theme.bracket_colors());
+        let hex = |c: Option<(u8, u8, u8, u8)>| c.map(|(r, g, b, _)| format!("#{r:02x}{g:02x}{b:02x}"));
+        // `fn` is a Rust keyword (Dark 2026 #ff7b72); `main` a function name.
+        assert_eq!(hex(color_at(&hl, 3, 0)).as_deref(), Some("#ff7b72"));
+        assert!(color_at(&hl, 3, 3).is_some());
+    }
+
+    #[test]
     fn detects_common_languages() {
         let lang = |n: &str| display_name(detect(Path::new(n), "").as_deref());
         assert_eq!(lang("a.tsx"), "TypeScript JSX");
@@ -295,5 +387,39 @@ mod tests {
         assert_eq!(lang("Cargo.toml"), "TOML");
         assert_eq!(lang("notes.unknownext"), "Plain Text");
         assert_eq!(display_name(detect(Path::new("run"), "#!/bin/bash\n").as_deref()), "Shell Script");
+    }
+}
+
+#[cfg(test)]
+mod mem {
+    fn rss_kb() -> i64 {
+        let s = std::fs::read_to_string("/proc/self/status").unwrap();
+        s.lines().find(|l| l.starts_with("VmRSS")).unwrap().split_whitespace().nth(1).unwrap().parse().unwrap()
+    }
+
+    /// `cargo test --release grammar_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn grammar_cost() {
+        let theme = crate::theme::ThemeModel::load(crate::theme::DEFAULT_THEME);
+        let b = theme.bracket_colors();
+        let samples = [
+            ("a.rs", "fn main() { let x = vec![1]; }\n"),
+            ("a.tsx", "export const A = () => <div className=\"x\">{1}</div>;\n"),
+            ("a.json", "{\"a\": [1, 2]}\n"),
+            ("b.md", "# Plain\n\nNo code.\n"),
+            ("a.md", "# Title\n\n```js\nlet a = 1;\n```\n"),
+            ("a.py", "def f(x):\n    return x\n"),
+            ("a.css", "a { color: red; }\n"),
+            ("a.html", "<div><script>let a=1;</script></div>\n"),
+        ];
+        let mut last = rss_kb();
+        for (name, src) in samples {
+            let t = std::time::Instant::now();
+            super::highlight(src, std::path::Path::new(name), crate::theme::DEFAULT_THEME, &b);
+            let now = rss_kb();
+            eprintln!("{name}: +{} MB in {:?}", (now - last) / 1024, t.elapsed());
+            last = now;
+        }
     }
 }

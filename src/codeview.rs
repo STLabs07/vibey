@@ -484,6 +484,10 @@ impl CodeView {
         }
         self.apply_metrics();
         self.emit();
+        // Highlighting allocates a lot transiently; give it back to the OS.
+        glib::idle_add_local_once(|| unsafe {
+            libc::malloc_trim(0);
+        });
     }
 
     /// Edit the buffer in place, bottom-up, and return the new line ranges that changed.

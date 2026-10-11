@@ -77,6 +77,9 @@ fn ms_since_exec() -> f64 {
 }
 
 fn main() -> glib::ExitCode {
+    // Worker threads (highlighting, indexing) would otherwise each get a malloc arena that
+    // keeps freed memory resident.
+    unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) };
     let args = parse_args();
     let mut cfg = config::load();
     if let Some(t) = &args.theme {

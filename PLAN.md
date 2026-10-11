@@ -136,8 +136,22 @@ Verified headlessly (`scripts/headless.sh`, Broadway backend, PNG snapshots). No
 user's desktop: quick open on a 737-file repo, find (124 matches), live reload (3 changed lines
 flash, then fade), theme preview + Escape revert, project switching from inside a terminal.
 
-**Memory on the GPU renderer is not re-measured yet.** That needs a visible window on the real
-display. The headless (software) run is 34–40 MB PSS with 3 projects open.
+**Memory (real display, `scripts/measure.sh`):**
+
+| Scenario | GPU (ngl) | software (cairo) |
+|---|---|---|
+| 1 project, 2 terminals, 1 file | 81 MB | 56 MB |
+| Spec target: 3 projects, 6 terminals, 6 files (this repo) | **95 MB** | 70 MB |
+| Same with real projects (TSX, Prisma, Markdown, 7 files) | **107 MB** | 86 MB |
+
+Startup is 277 ms median. The first real-project run was **188 MB**. Fixes:
+- Markdown's grammar embeds ~60 fenced-code languages and compiled all of them (+46 MB for a 21-byte
+  README). We now register VS Code's markdown grammar without them and highlight each fenced block
+  with its own language, so only the languages actually present are loaded (6 MB, plus each used language).
+- `M_ARENA_MAX=2` and `malloc_trim` after each load: worker-thread arenas were holding freed memory.
+
+Per-grammar cost (RSS, first use): Rust 2 MB, TSX 6 MB, CSS 3 MB, Markdown 6 MB, JSON/HTML/Python ≈0–1 MB.
+Under the 120 MB cap. GPU is slightly above the 60–100 MB "ideal" with real projects.
 
 Known gaps carried forward: the tree doesn't auto-reveal the active file yet. Files over 4 MB show
 without highlighting, and files over 8 MB show a notice.

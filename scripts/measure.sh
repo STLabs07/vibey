@@ -41,3 +41,19 @@ for renderer in ngl gl cairo; do
     wait "$pid" 2>/dev/null || true
   done
 done
+
+# Target scenario from the spec: 3 projects, 6 terminals (2 each), 2 files open per project.
+# PROJECTS="a b c" overrides the default (this repo + two of its subdirectories).
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+read -r -a PROJ <<< "${PROJECTS:-$ROOT $ROOT/src $ROOT/assets}"
+STEPS="wait 1500"
+for i in 1 2 3; do
+  STEPS="$STEPS; project $i; wait 600; key ctrl+shift+grave; key ctrl+p; type .; wait 400; enter; wait 800; key ctrl+p; type .; wait 400; down; enter; wait 800"
+done
+echo
+echo "== target scenario: 3 projects, 6 terminals, 6 files =="
+for renderer in ngl cairo; do
+  printf "%-8s " "$renderer"
+  GSK_RENDERER=$renderer VIBEY_SELFTEST="$STEPS; wait 4000; mem; quit" timeout 120 "$BIN" "${PROJ[@]}" 2>&1 \
+    | awk '/selftest: Pss/ {printf "%.1f MB PSS\n", $3/1024}'
+done
