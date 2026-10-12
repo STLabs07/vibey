@@ -66,6 +66,11 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
                 p.terminals.feed(&format!("{arg}\n"));
             }
         }
+        "tsel" => {
+            if let Some(p) = app.active_project() {
+                p.terminals.selftest(arg);
+            }
+        }
         "find" => {
             if let Some(p) = app.active_project() {
                 p.editor.show_find();

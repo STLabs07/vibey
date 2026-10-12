@@ -293,6 +293,7 @@ impl TerminalPanel {
             }
         });
         chip.add_controller(click);
+        install_clipboard(&t);
 
         let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(&t));
         term.connect_child_exited(move |_, _| {
@@ -552,6 +553,49 @@ impl TerminalPanel {
         }
     }
 
+    /// Self-test hooks: `select`, `clear`, `copy` (prints the clipboard), `menu <png>` (prints the items).
+    pub fn selftest(&self, cmd: &str) {
+        let Some(t) = self.terms.borrow().get(self.active.get()).cloned() else { return };
+        let (cmd, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
+        match cmd {
+            "select" => t.term.select_all(),
+            "clear" => clear(&t.term),
+            "copy" => {
+                copy(&t.term);
+                t.term.clipboard().read_text_async(None::<&gio::Cancellable>, |r| {
+                    eprintln!("selftest: clipboard={:?}", r.ok().flatten().map(|s| s.trim().to_string()));
+                });
+            }
+            "menu" => {
+                let path = arg.to_string();
+                let pop = context_menu(&t, 40.0, 40.0);
+                glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                    let mut b = pop.child().and_then(|c| c.first_child());
+                    while let Some(w) = b {
+                        if let Some(btn) = w.downcast_ref::<gtk::Button>() {
+                            let text = btn.child().and_then(|r| r.first_child()).and_downcast::<gtk::Label>().map(|l| l.text());
+                            eprintln!("selftest: menu {:?} enabled={}", text.unwrap_or_default(), btn.is_sensitive());
+                        }
+                        b = w.next_sibling();
+                    }
+                    let (w, h) = (pop.width() as f64, pop.height() as f64);
+                    let snap = gtk::Snapshot::new();
+                    gtk::WidgetPaintable::new(Some(&pop)).snapshot(&snap, w, h);
+                    if let Some(node) = snap.to_node() {
+                        let r = gtk::gsk::CairoRenderer::new();
+                        if r.realize_for_display(&WidgetExt::display(&pop)).is_ok() {
+                            let tex = r.render_texture(&node, None);
+                            let _ = tex.save_to_png(&path);
+                            r.unrealize();
+                        }
+                    }
+                    pop.popdown();
+                });
+            }
+            _ => eprintln!("selftest: unknown terminal command {cmd}"),
+        }
+    }
+
     pub fn focus(&self) {
         let t = self.terms.borrow().get(self.active.get()).cloned();
         if let Some(t) = t {
@@ -574,6 +618,108 @@ impl TerminalPanel {
     pub fn running_jobs(&self) -> Vec<String> {
         self.terms.borrow().iter().filter_map(|t| t.foreground_pgid().and_then(process_name)).collect()
     }
+}
+
+/// Copy and paste like GNOME Terminal (Ctrl+Shift+C / Ctrl+Shift+V), Ctrl+C copies instead of
+/// interrupting while text is selected (like Windows Terminal), and a right-click menu.
+fn install_clipboard(t: &Rc<Term>) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let term = t.term.downgrade();
+    keys.connect_key_pressed(move |_, key, _, mods| {
+        use gtk::gdk::{Key, ModifierType as M};
+        let Some(term) = term.upgrade() else { return glib::Propagation::Proceed };
+        if !mods.contains(M::CONTROL_MASK) || mods.contains(M::ALT_MASK) {
+            return glib::Propagation::Proceed;
+        }
+        let shift = mods.contains(M::SHIFT_MASK);
+        match key.to_lower() {
+            Key::c if shift || term.has_selection() => copy(&term),
+            Key::v if shift => term.paste_clipboard(),
+            _ => return glib::Propagation::Proceed,
+        }
+        glib::Propagation::Stop
+    });
+    t.term.add_controller(keys);
+
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_SECONDARY);
+    click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let wt = Rc::downgrade(t);
+    click.connect_pressed(move |g, _, x, y| {
+        let Some(t) = wt.upgrade() else { return };
+        g.set_state(gtk::EventSequenceState::Claimed);
+        t.term.grab_focus();
+        context_menu(&t, x, y);
+    });
+    t.term.add_controller(click);
+}
+
+/// Copy the selection as plain text and drop it, so the next Ctrl+C interrupts again.
+fn copy(term: &vte4::Terminal) {
+    if term.has_selection() {
+        term.copy_clipboard_format(vte4::Format::Text);
+        term.unselect_all();
+    }
+}
+
+/// Clear the screen and scrollback, then have the shell redraw its prompt (Ctrl+L).
+fn clear(term: &vte4::Terminal) {
+    term.reset(true, true);
+    term.feed_child(b"\x0c");
+}
+
+fn context_menu(t: &Rc<Term>, x: f64, y: f64) -> gtk::Popover {
+    let pop = gtk::Popover::new();
+    pop.set_has_arrow(false);
+    pop.set_position(gtk::PositionType::Bottom);
+    pop.set_halign(gtk::Align::Start);
+    pop.add_css_class("menu-popover");
+    pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    let b = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    // A reset under a running program (an AI CLI, vim) would scramble its screen, so Clear
+    // is only offered at a shell prompt.
+    let at_prompt = t.foreground_pgid().is_none();
+    let items: [(&str, &str, bool, fn(&vte4::Terminal)); 4] = [
+        ("Copy", "Ctrl+Shift+C", t.term.has_selection(), copy),
+        ("Paste", "Ctrl+Shift+V", true, |t| t.paste_clipboard()),
+        ("Select All", "", true, |t| t.select_all()),
+        ("Clear", "", at_prompt, clear),
+    ];
+    for (name, accel, enabled, action) in items {
+        if name == "Clear" {
+            b.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        }
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 24);
+        let label = gtk::Label::new(Some(name));
+        label.set_hexpand(true);
+        label.set_xalign(0.0);
+        row.append(&label);
+        let keys = gtk::Label::new(Some(accel));
+        keys.add_css_class("accel");
+        row.append(&keys);
+        let btn = gtk::Button::builder().child(&row).sensitive(enabled).build();
+        btn.add_css_class("flat");
+        btn.add_css_class("menu-item");
+        let (p, term) = (pop.clone(), t.term.downgrade());
+        btn.connect_clicked(move |_| {
+            p.popdown();
+            if let Some(term) = term.upgrade() {
+                action(&term);
+                term.grab_focus();
+            }
+        });
+        b.append(&btn);
+    }
+    pop.set_child(Some(&b));
+    pop.set_parent(&t.term);
+    // Unparent after the click handler that closed it has finished.
+    pop.connect_closed(|p| {
+        let p = p.clone();
+        glib::idle_add_local_once(move || p.unparent());
+    });
+    pop.popup();
+    pop
 }
 
 fn apply_colors(term: &vte4::Terminal, theme: &ThemeModel) {

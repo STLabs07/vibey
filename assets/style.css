@@ -416,6 +416,10 @@ popover > contents {
 }
 popover > arrow { background: none; border: none; }
 popover checkbutton { padding: {{2}} {{6}}; }
+popover button.menu-item { padding: {{4}} {{10}}; border-radius: {{3}}; }
+popover button.menu-item:disabled { opacity: 0.45; }
+popover .accel { color: @vs_descriptionForeground; font-size: {{~12}}; }
+popover separator { margin: {{4}} 0; background-color: @vs_editorWidget_border; }
 .dim { color: @vs_descriptionForeground; font-size: {{~12}}; padding: {{4}} {{6}}; }
 
 /* ---- empty editor watermark ---- */
