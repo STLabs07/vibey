@@ -1,5 +1,7 @@
 //! Read-only code view: GtkTextView + a custom gutter (line numbers; git bars later).
 //!
+//! The one write: clicking a Markdown task box (`- [ ]`) ticks or unticks it on disk.
+//!
 //! Live reload: a GIO file monitor triggers a re-read; the new text is diffed against the
 //! old off the UI thread, the buffer is edited in place (so the scroll position stays), and
 //! changed lines are highlighted briefly, then fade out.
@@ -152,6 +154,36 @@ enum Content {
     Error(String),
 }
 
+/// Markdown task boxes (`- [ ]`, `* [x]`, `1. [ ]`, or a bare `[ ]` starting the line):
+/// (line, byte column of the `[`).
+fn task_boxes(text: &str) -> Vec<(usize, usize)> {
+    text.split('\n')
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let body = line.trim_start();
+            let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+            let rest = if let Some(r) = body.strip_prefix(['-', '*', '+']) {
+                r.strip_prefix(' ')?
+            } else if digits > 0 {
+                body[digits..].strip_prefix(['.', ')'])?.strip_prefix(' ')?
+            } else {
+                body
+            };
+            let b = rest.as_bytes();
+            let is_box = b.len() >= 3
+                && b[0] == b'['
+                && matches!(b[1], b' ' | b'x' | b'X')
+                && b[2] == b']'
+                && b.get(3).is_none_or(|c| c.is_ascii_whitespace());
+            is_box.then(|| (i, line.len() - rest.len()))
+        })
+        .collect()
+}
+
+fn is_markdown(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+}
+
 /// The file's index version, cached until the index changes.
 type Base = Option<(std::time::SystemTime, Arc<str>)>;
 
@@ -244,6 +276,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn finds_task_boxes() {
+        let text = "# Plan\n- [ ] a\n  * [x] b\n12. [X] c\n[ ] d\n- [ ]\n- [y] no\n-[ ] no\nsee [ ] no\n- [ ]x no";
+        assert_eq!(task_boxes(text), vec![(1, 2), (2, 4), (3, 4), (4, 0), (5, 2)]);
+    }
+
+    #[test]
     fn markers_like_vscode() {
         let base = "a\nb\nc\nd\n";
         let text = "a\nB\nc\nnew\n"; // b modified, d deleted then a line added in its place
@@ -284,6 +322,10 @@ pub struct CodeView {
     changed_tag: gtk::TextTag,
     find_tag: gtk::TextTag,
     find_current_tag: gtk::TextTag,
+    task_tag: gtk::TextTag,
+    /// Markdown task boxes in the shown text: (line, byte column).
+    tasks: RefCell<Vec<(usize, usize)>>,
+    over_task: Cell<bool>,
     find: RefCell<Find>,
     fade: RefCell<Option<glib::SourceId>>,
     monitor: RefCell<Option<gio::FileMonitor>>,
@@ -316,7 +358,9 @@ impl CodeView {
         let changed_tag = gtk::TextTag::new(None);
         let find_tag = gtk::TextTag::new(None);
         let find_current_tag = gtk::TextTag::new(None);
-        for t in [&changed_tag, &find_tag, &find_current_tag] {
+        let task_tag = gtk::TextTag::new(None);
+        task_tag.set_weight(700);
+        for t in [&changed_tag, &find_tag, &find_current_tag, &task_tag] {
             table.add(t);
         }
 
@@ -334,6 +378,9 @@ impl CodeView {
             changed_tag,
             find_tag,
             find_current_tag,
+            task_tag,
+            tasks: RefCell::new(Vec::new()),
+            over_task: Cell::new(false),
             find: RefCell::new(Find::default()),
             fade: RefCell::new(None),
             monitor: RefCell::new(None),
@@ -356,7 +403,102 @@ impl CodeView {
                 cv.emit();
             }
         });
+        cv.install_task_clicks();
         cv
+    }
+
+    /// Click a task box to tick/untick it; the pointer becomes a hand over one.
+    fn install_task_clicks(self: &Rc<Self>) {
+        let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
+        // Capture phase: the text view's own gesture would otherwise start a selection.
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        click.connect_pressed(move |g, n, x, y| {
+            let Some(cv) = weak.upgrade() else { return };
+            if let (1, Some(task)) = (n, cv.task_at(x, y)) {
+                g.set_state(gtk::EventSequenceState::Claimed);
+                cv.toggle_task(task);
+            }
+        });
+        self.view.add_controller(click);
+
+        let motion = gtk::EventControllerMotion::new();
+        let weak = Rc::downgrade(self);
+        motion.connect_motion(move |_, x, y| {
+            let Some(cv) = weak.upgrade() else { return };
+            let over = cv.task_at(x, y).is_some();
+            if cv.over_task.replace(over) != over {
+                cv.view.set_cursor_from_name(Some(if over { "pointer" } else { "text" }));
+            }
+        });
+        self.view.add_controller(motion);
+    }
+
+    /// The task box under widget point (x, y), if any.
+    fn task_at(&self, x: f64, y: f64) -> Option<(usize, usize)> {
+        if self.tasks.borrow().is_empty() || self.deleted.get() {
+            return None;
+        }
+        let (bx, by) = self.view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+        let (iter, _) = self.view.iter_at_position(bx, by)?;
+        // Past the end of a line this is still the last character; require the point on it.
+        let r = self.view.iter_location(&iter);
+        if bx < r.x() || bx >= r.x() + r.width() || !iter.has_tag(&self.task_tag) {
+            return None;
+        }
+        let (line, index) = (iter.line() as usize, iter.line_index() as usize);
+        self.tasks.borrow().iter().copied().find(|&(l, c)| l == line && (c..c + 3).contains(&index))
+    }
+
+    /// Flip `[ ]` ↔ `[x]` in the file on disk; the file monitor then reloads the view. Only if
+    /// that line on disk is still what's shown (the AI may have just rewritten the file).
+    fn toggle_task(&self, (line, col): (usize, usize)) {
+        let path = self.path();
+        let Some(shown) = self.text.borrow().as_deref().and_then(|t| t.split('\n').nth(line)).map(str::to_owned) else {
+            return;
+        };
+        let Ok(mut bytes) = std::fs::read(&path) else { return };
+        let start: usize = bytes.split(|&b| b == b'\n').take(line).map(|l| l.len() + 1).sum();
+        if bytes.get(start..).and_then(|rest| rest.split(|&b| b == b'\n').next()) != Some(shown.as_bytes()) {
+            return;
+        }
+        let i = start + col + 1;
+        bytes[i] = if bytes[i] == b' ' { b'x' } else { b' ' };
+        if let Err(e) = std::fs::write(&path, &bytes) {
+            eprintln!("vibey: cannot update {}: {e}", path.display());
+        }
+    }
+
+    /// Self-test: click the middle of task box `n` (through the same hit test as the mouse).
+    pub fn selftest_tick(&self, n: usize) {
+        let Some((line, col)) = self.tasks.borrow().get(n).copied() else {
+            eprintln!("selftest: no task box {n}");
+            return;
+        };
+        let buffer = self.view.buffer();
+        let Some(iter) = buffer.iter_at_line_index(line as i32, col as i32 + 1) else { return };
+        let r = self.view.iter_location(&iter);
+        let (x, y) = self.view.buffer_to_window_coords(gtk::TextWindowType::Widget, r.x() + r.width() / 2, r.y() + r.height() / 2);
+        let hit = self.task_at(x as f64, y as f64);
+        eprintln!("selftest: tick {n} at ({x},{y}) hit={hit:?}");
+        if let Some(task) = hit {
+            self.toggle_task(task);
+        }
+    }
+
+    fn mark_tasks(&self, text: &str) {
+        let buffer = self.view.buffer();
+        buffer.remove_tag(&self.task_tag, &buffer.start_iter(), &buffer.end_iter());
+        let tasks = if is_markdown(&self.path()) { task_boxes(text) } else { Vec::new() };
+        for &(line, col) in &tasks {
+            if let (Some(a), Some(b)) =
+                (buffer.iter_at_line_index(line as i32, col as i32), buffer.iter_at_line_index(line as i32, col as i32 + 3))
+            {
+                buffer.apply_tag(&self.task_tag, &a, &b);
+            }
+        }
+        *self.tasks.borrow_mut() = tasks;
     }
 
     /// Called after (re)loads, cursor moves and deleted-state changes.
@@ -606,6 +748,7 @@ impl CodeView {
                     Content::Text(_) => unreachable!(),
                 };
                 *self.text.borrow_mut() = None;
+                self.tasks.borrow_mut().clear();
                 buffer.set_text(&msg);
                 self.emit();
                 return;
@@ -625,6 +768,9 @@ impl CodeView {
             if !is_reload {
                 buffer.place_cursor(&buffer.start_iter());
             }
+        }
+        if !(is_reload && unchanged) {
+            self.mark_tasks(&text);
         }
         if let Some(hl) = loaded.hl {
             *self.language.borrow_mut() = hl.language.clone();

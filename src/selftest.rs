@@ -71,6 +71,11 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
                 p.terminals.selftest(arg);
             }
         }
+        "tick" => {
+            if let Some(v) = app.active_project().and_then(|p| p.editor.views().into_iter().next()) {
+                v.selftest_tick(arg.parse().unwrap_or(0));
+            }
+        }
         "find" => {
             if let Some(p) = app.active_project() {
                 p.editor.show_find();

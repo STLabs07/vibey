@@ -16,6 +16,11 @@ Changes from the brief are marked **[rev]**.
 - 2026-10-11, **file watching: notify → GIO file monitors**, which are already in-process via GTK. One less
   dependency and no extra thread. Approved.
 - 2026-10-11, **renderer**: GPU by default; `renderer = "software"` in config.toml saves ≈25 MB.
+- 2026-10-12, **Markdown task boxes are clickable**: the one write Vibey makes. Clicking `[ ]` / `[x]`
+  in a `.md` file flips that one character on disk, and only if the line on disk still matches what's
+  shown. The AI writes task lists and the user ticks them off. General editing stays out.
+- 2026-10-12, **terminal clipboard**: Ctrl+Shift+C/V, Ctrl+C copies while text is selected, and a
+  right-click menu (Copy, Paste, Select All, Clear). Clear is only offered at a shell prompt.
 
 ## What this is
 A very lightweight, Linux-only, READ-ONLY "VS Code-shaped" window for people who code
@@ -30,7 +35,8 @@ IN: file tree, read-only syntax-highlighted code view with tabs, embedded termin
 multiple projects in one window, live file reload, git status display, resource monitoring,
 `vibey .` launcher, file finder (Ctrl+P), find in file (Ctrl+F), theme picker.
 
-OUT, permanently: editing, extensions/plugins, debugger, LSP, IntelliSense, search-and-replace.
+OUT, permanently: editing (except ticking Markdown task boxes, see the log), extensions/plugins,
+debugger, LSP, IntelliSense, search-and-replace.
 
 **[rev] Allowed, because they don't edit anything:** selecting and copying text in the code view,
 "Copy path" and "Copy relative path" in the tree, file finder, find in file. **Not decided yet:**

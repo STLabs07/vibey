@@ -57,6 +57,7 @@ folders are restored on the next start.
 | Ctrl+` / Ctrl+Shift+` | Toggle focus editor ↔ terminal / new terminal |
 | Ctrl+K Ctrl+T | Color theme picker (live preview, Escape reverts) |
 | Ctrl+Shift+R | Resource panel: CPU / memory per project → terminal → process, with kill |
+| Ctrl+Shift+C / Ctrl+Shift+V | Copy / paste in a terminal. Ctrl+C also copies while text is selected (otherwise it interrupts as usual). Right-click: Copy, Paste, Select All, Clear |
 
 Focus in a terminal: only Ctrl+P, Ctrl+F, Ctrl+1…9, Alt+1…9 and Ctrl+` are taken. Every other key (Ctrl+W,
 Ctrl+F, Ctrl+K, …) goes to the shell or CLI.
@@ -76,6 +77,10 @@ your AI CLI's commits.
 
 Click in the tree opens a preview tab (italic, replaced by the next click). Double-click pins it.
 When a file changes on disk, its tab updates in place and the changed lines flash, then fade.
+
+Vibey never edits your files, with one exception: in a Markdown file, click a task box
+(`- [ ]`) to tick it off (`- [x]`), and click again to untick. Handy when the AI writes a task
+list and asks you to mark things done.
 
 ## Configure
 
