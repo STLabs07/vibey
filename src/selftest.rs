@@ -7,7 +7,7 @@
 //! Commands: `term TEXT` (typed into the shown terminal + Enter), `wait MS`, `key SPEC` (e.g. ctrl+shift+grave), `type TEXT` (quick pick or
 //! find box), `enter`, `down`, `escape`, `find TEXT`, `project N`, `theme ID`,
 //! `exec SHELL…`, `shot FILE`, `mem`, `close`, `answer yes|no`, `hover N`, `tree expand|collapse REL | rows | flap REL N`,
-//! `pmenu N [close]`, `quit`.
+//! `pmenu N [close]`, `open PATH`, `file edit LINE TEXT | save [force] | ctrls | autosave | focus | undo | state | close` (the open file), `quit`.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -104,6 +104,16 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
         "pmenu" => {
             let (n, how) = arg.split_once(' ').unwrap_or((arg, ""));
             app.selftest_project_menu(n.parse().unwrap_or(1), how == "close");
+        }
+        // `open PATH` (relative to the active project) as a pinned tab.
+        "open" => {
+            if let Some(p) = app.active_project() {
+                p.open_file(&p.root.join(arg), true);
+            }
+        }
+        "file" => {
+            let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+            app.selftest_file(sub, rest.trim());
         }
         "exec" => {
             let ok = std::process::Command::new("sh").args(["-c", arg]).status().is_ok_and(|s| s.success());

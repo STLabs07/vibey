@@ -1,10 +1,18 @@
-//! Read-only code view: GtkTextView + a custom gutter (line numbers; git bars later).
+//! Code view: GtkTextView + a custom gutter (line numbers, git bars).
 //!
-//! The one write: clicking a Markdown task box (`- [ ]`) ticks or unticks it on disk.
+//! Editing is deliberately plain: type, paste, undo, save. It exists for things an AI CLI
+//! can't do for you (pasting an API key into `.env`), not to compete with an IDE.
+//!
+//! - `dirty`: the buffer differs from `text`, the file as last read or written.
+//! - Save writes atomically and keeps the file's permissions. It refuses (a *conflict*) when
+//!   the file on disk is no longer the version the edits started from, unless forced.
+//! - Files that can't round-trip through a text buffer (not UTF-8, NUL bytes) stay read-only.
+//! - Clicking a Markdown task box (`- [ ]`) ticks or unticks it.
 //!
 //! Live reload: a GIO file monitor triggers a re-read; the new text is diffed against the
 //! old off the UI thread, the buffer is edited in place (so the scroll position stays), and
-//! changed lines are highlighted briefly, then fade out.
+//! changed lines are highlighted briefly, then fade out. A reload never touches a dirty
+//! buffer; it flags a conflict instead.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -148,6 +156,9 @@ glib::wrapper! {
 
 enum Content {
     Text(Arc<str>),
+    /// Text with bytes that aren't UTF-8, shown with replacement characters. Viewable but
+    /// never saved: writing it back would corrupt the file.
+    Lossy(Arc<str>),
     Binary,
     TooLarge(u64),
     Missing,
@@ -189,6 +200,8 @@ type Base = Option<(std::time::SystemTime, Arc<str>)>;
 
 struct Loaded {
     content: Content,
+    /// Not valid UTF-8: shown, but read-only.
+    lossy: bool,
     hl: Option<Highlighted>,
     markers: Vec<u8>,
     base: Base,
@@ -206,10 +219,67 @@ fn read(path: &Path) -> Content {
         return Content::TooLarge(size);
     }
     match std::fs::read(path) {
-        Ok(b) if b[..b.len().min(8192)].contains(&0) => Content::Binary,
-        Ok(b) => Content::Text(String::from_utf8_lossy(&b).into()),
+        // A text buffer can't hold a NUL, so such a file couldn't be shown (or saved) intact.
+        Ok(b) if b.contains(&0) => Content::Binary,
+        Ok(b) => match String::from_utf8(b) {
+            Ok(s) => Content::Text(s.into()),
+            Err(e) => Content::Lossy(String::from_utf8_lossy(e.as_bytes()).into()),
+        },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Content::Missing,
         Err(e) => Content::Error(e.to_string()),
+    }
+}
+
+/// `text` as it should be written over a file whose last-known content is `disk`: a file
+/// that uses CRLF throughout keeps it, so a line the user adds (a bare `\n`) doesn't leave
+/// the file with mixed endings.
+fn with_file_eol(disk: &str, text: &str) -> String {
+    let crlf = disk.contains("\r\n") && !disk.replace("\r\n", "").contains('\n');
+    if !crlf {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut prev = '\0';
+    for c in text.chars() {
+        if c == '\n' && prev != '\r' {
+            out.push('\r');
+        }
+        out.push(c);
+        prev = c;
+    }
+    out
+}
+
+/// Replace `path`'s content: write a sibling temp file, then rename it over the target, so a
+/// crash can't leave a half-written file. Keeps the file's permissions (it's often a secrets
+/// file: the temp file is owner-only until they're copied) and writes through symlinks. If
+/// the directory isn't writable, falls back to rewriting the file in place.
+fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let meta = std::fs::metadata(&target).ok();
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = target.with_file_name(format!(".{name}.vibey-{}.tmp", std::process::id()));
+    let atomic = || -> std::io::Result<()> {
+        // An existing file's mode is copied after writing; a new file gets the umask default.
+        let mode = if meta.is_some() { 0o600 } else { 0o666 };
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
+        f.write_all(bytes)?;
+        if let Some(m) = &meta {
+            f.set_permissions(m.permissions())?;
+        }
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, &target)
+    };
+    match atomic() {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            std::fs::write(&target, bytes)
+        }
     }
 }
 
@@ -248,9 +318,12 @@ fn index_base(path: &Path, cached: Base) -> Base {
 
 /// Read + highlight (+ diff against `old`, + git markers), on a worker thread.
 fn load(path: &Path, old: Option<Arc<str>>, theme_id: &str, brackets: &BracketColors, base: Base) -> Loaded {
-    let content = read(path);
+    let (content, lossy) = match read(path) {
+        Content::Lossy(t) => (Content::Text(t), true),
+        c => (c, false),
+    };
     let Content::Text(text) = &content else {
-        return Loaded { content, hl: None, markers: Vec::new(), base, ops: Vec::new() };
+        return Loaded { content, lossy, hl: None, markers: Vec::new(), base, ops: Vec::new() };
     };
     let base = index_base(path, base);
     let markers = base.as_ref().map(|(_, b)| line_markers(b, text)).unwrap_or_default();
@@ -268,7 +341,7 @@ fn load(path: &Path, old: Option<Arc<str>>, theme_id: &str, brackets: &BracketCo
         _ => Vec::new(),
     };
     let hl = highlight::highlight(text, path, theme_id, brackets);
-    Loaded { content, hl: Some(hl), markers, base, ops }
+    Loaded { content, lossy, hl: Some(hl), markers, base, ops }
 }
 
 #[cfg(test)]
@@ -279,6 +352,44 @@ mod tests {
     fn finds_task_boxes() {
         let text = "# Plan\n- [ ] a\n  * [x] b\n12. [X] c\n[ ] d\n- [ ]\n- [y] no\n-[ ] no\nsee [ ] no\n- [ ]x no";
         assert_eq!(task_boxes(text), vec![(1, 2), (2, 4), (3, 4), (4, 0), (5, 2)]);
+    }
+
+    #[test]
+    fn crlf_files_stay_crlf() {
+        assert_eq!(with_file_eol("a\r\nb\r\n", "a\r\nX\nb\r\n"), "a\r\nX\r\nb\r\n");
+        assert_eq!(with_file_eol("a\r\nb\r\n", "a\r\nb\r\n"), "a\r\nb\r\n");
+        // LF files, mixed files and files with no newline are written as they are.
+        assert_eq!(with_file_eol("a\nb\n", "a\nX\n"), "a\nX\n");
+        assert_eq!(with_file_eol("a\r\nb\n", "a\nX\n"), "a\nX\n");
+        assert_eq!(with_file_eol("KEY=", "KEY=1\n"), "KEY=1\n");
+    }
+
+    #[test]
+    fn write_keeps_permissions_and_links() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("vibey-write-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(".env");
+        std::fs::write(&file, "OLD=1\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_file(&file, b"NEW=2\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "NEW=2\n");
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // Through a symlink: the link stays a link, the target changes.
+        let link = dir.join("link.env");
+        symlink(&file, &link).unwrap();
+        write_file(&link, b"VIA=link\n").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "VIA=link\n");
+
+        // A new file; no temp files are left behind.
+        write_file(&dir.join("fresh.txt"), b"x").unwrap();
+        let mut names: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+        names.sort();
+        assert_eq!(names, [".env", "fresh.txt", "link.env"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -335,6 +446,42 @@ pub struct CodeView {
     base: RefCell<Base>,
     /// (0-based line, byte column, byte length) to select once the text is loaded.
     pending_reveal: Cell<Option<(i32, i32, i32)>>,
+    /// The buffer has edits that aren't on disk.
+    dirty: Cell<bool>,
+    /// The file changed on disk while there were unsaved edits.
+    conflict: Cell<bool>,
+    /// The file can't be edited here (binary, not UTF-8, a notice is showing, …).
+    read_only: Cell<bool>,
+    /// Vibey itself is replacing the buffer's text (load, reload); not a user edit.
+    applying: Cell<bool>,
+    /// Bumped on every user edit; results computed for older text are dropped.
+    edit_gen: Cell<u64>,
+    /// Pending re-highlight after typing stops.
+    settle: RefCell<Option<glib::SourceId>>,
+}
+
+/// Save when focus leaves a file or the window (see `config.auto_save`).
+static AUTO_SAVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_auto_save(on: bool) {
+    AUTO_SAVE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn auto_save() -> bool {
+    AUTO_SAVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How a save ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Saved {
+    Done,
+    /// Nothing to write: the buffer already matches the file.
+    Unchanged,
+    /// The file on disk changed since the edits began; nothing was written.
+    Conflict,
+    /// Not editable here.
+    ReadOnly,
+    Failed(String),
 }
 
 impl CodeView {
@@ -389,6 +536,12 @@ impl CodeView {
             on_reload: RefCell::new(None),
             base: RefCell::new(None),
             pending_reveal: Cell::new(None),
+            dirty: Cell::new(false),
+            conflict: Cell::new(false),
+            read_only: Cell::new(true),
+            applying: Cell::new(false),
+            edit_gen: Cell::new(0),
+            settle: RefCell::new(None),
         });
         cv.apply_colors();
         let weak = Rc::downgrade(&cv);
@@ -403,8 +556,220 @@ impl CodeView {
                 cv.emit();
             }
         });
+        let weak = Rc::downgrade(&cv);
+        cv.view.buffer().connect_changed(move |_| {
+            if let Some(cv) = weak.upgrade() {
+                cv.on_user_edit();
+            }
+        });
+        // Leaving the view (another tab, the terminal, a different window) saves.
+        let focus = gtk::EventControllerFocus::new();
+        let weak = Rc::downgrade(&cv);
+        focus.connect_leave(move |_| {
+            if let Some(cv) = weak.upgrade() {
+                cv.autosave();
+            }
+        });
+        cv.view.add_controller(focus);
         cv.install_task_clicks();
         cv
+    }
+
+    // ---- editing ----
+
+    /// Run `f` with the buffer marked as being changed by Vibey, not the user. The undo
+    /// history is dropped: undoing past a reload would resurrect text the file no longer has.
+    fn programmatic<R>(&self, f: impl FnOnce(&gtk::TextBuffer) -> R) -> R {
+        let buffer = self.view.buffer();
+        self.applying.set(true);
+        buffer.begin_irreversible_action();
+        let r = f(&buffer);
+        buffer.end_irreversible_action();
+        self.applying.set(false);
+        r
+    }
+
+    fn buffer_text(&self) -> String {
+        let b = self.view.buffer();
+        b.text(&b.start_iter(), &b.end_iter(), false).to_string()
+    }
+
+    /// The text as it would be written to the file.
+    fn rendered(&self, buffer_text: &str) -> String {
+        match self.text.borrow().as_deref() {
+            Some(disk) => with_file_eol(disk, buffer_text),
+            None => buffer_text.to_string(),
+        }
+    }
+
+    /// What the file should look like now: the buffer, which may hold unsaved edits.
+    fn current_text(&self) -> Option<Arc<str>> {
+        if self.dirty.get() {
+            Some(self.rendered(&self.buffer_text()).into())
+        } else {
+            self.text.borrow().clone()
+        }
+    }
+
+    fn on_user_edit(self: &Rc<Self>) {
+        if self.applying.get() || self.read_only.get() {
+            return;
+        }
+        self.dirty.set(true);
+        self.edit_gen.set(self.edit_gen.get() + 1);
+        // Re-highlight and re-diff once typing pauses.
+        if let Some(id) = self.settle.borrow_mut().take() {
+            id.remove();
+        }
+        let weak = Rc::downgrade(self);
+        let id = glib::timeout_add_local_once(Duration::from_millis(350), move || {
+            if let Some(cv) = weak.upgrade() {
+                cv.settle.borrow_mut().take();
+                cv.refresh_derived();
+            }
+        });
+        *self.settle.borrow_mut() = Some(id);
+        self.emit();
+    }
+
+    /// Recompute everything derived from the text after edits: is it still different from
+    /// the file, syntax colors, git gutter, task boxes, find matches.
+    fn refresh_derived(self: &Rc<Self>) {
+        let Some(disk) = self.text.borrow().clone() else { return };
+        let text = self.buffer_text();
+        let rendered = self.rendered(&text);
+        let was_dirty = self.dirty.replace(*disk != *rendered);
+        let generation = self.edit_gen.get();
+        let (path, base) = (self.path(), self.base.borrow().clone());
+        let (theme_id, brackets) = {
+            let s = self.style.borrow();
+            (s.theme_id.clone(), s.brackets.clone())
+        };
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let text2 = text.clone();
+            let res = gio::spawn_blocking(move || {
+                let markers = base.as_ref().map(|(_, b)| line_markers(b, &text2)).unwrap_or_default();
+                let hl = highlight::highlight(&text2, &path, &theme_id, &brackets);
+                (markers, hl)
+            })
+            .await;
+            if this.edit_gen.get() != generation || this.applying.get() {
+                return;
+            }
+            if let Ok((markers, hl)) = res {
+                *this.gutter.imp().markers.borrow_mut() = markers;
+                this.gutter.queue_draw();
+                this.mark_tasks(&text);
+                this.apply_highlight(hl);
+                let (q, case) = {
+                    let f = this.find.borrow();
+                    (f.query.clone(), f.case_sensitive)
+                };
+                if !q.is_empty() {
+                    this.find(&q, case);
+                }
+                this.apply_metrics();
+            }
+        });
+        if was_dirty != self.dirty.get() {
+            self.emit();
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.get()
+    }
+
+    /// The file changed on disk while there were unsaved edits.
+    pub fn has_conflict(&self) -> bool {
+        self.conflict.get()
+    }
+
+    /// Write the buffer to the file. Without `overwrite`, a file that changed on disk since
+    /// the edits began is left alone and reported as a conflict.
+    pub fn save(self: &Rc<Self>, overwrite: bool) -> Saved {
+        let Some(disk) = self.text.borrow().clone() else { return Saved::ReadOnly };
+        if self.read_only.get() {
+            return Saved::ReadOnly;
+        }
+        let rendered = self.rendered(&self.buffer_text());
+        if rendered == *disk {
+            // Edited back to what the file has.
+            if self.dirty.replace(false) {
+                self.emit();
+            }
+            return Saved::Unchanged;
+        }
+        let path = self.path();
+        if !overwrite {
+            match read(&path) {
+                Content::Text(d) | Content::Lossy(d) if *d != *disk => {
+                    if !self.conflict.replace(true) {
+                        self.emit();
+                    }
+                    return Saved::Conflict;
+                }
+                // Deleted since: saving recreates it.
+                Content::Text(_) | Content::Lossy(_) | Content::Missing => {}
+                Content::Binary => return Saved::Failed("the file on disk is now binary".into()),
+                Content::TooLarge(_) => return Saved::Failed("the file on disk is now too large".into()),
+                Content::Error(e) => return Saved::Failed(e),
+            }
+        }
+        if let Err(e) = write_file(&path, rendered.as_bytes()) {
+            return Saved::Failed(e.to_string());
+        }
+        *self.text.borrow_mut() = Some(rendered.into());
+        self.dirty.set(false);
+        self.conflict.set(false);
+        self.deleted.set(false);
+        self.refresh_derived();
+        self.emit();
+        let f = self.on_reload.borrow().clone();
+        if let Some(f) = f {
+            f();
+        }
+        Saved::Done
+    }
+
+    /// Save without asking, when `auto_save` is on. Conflicts and failures leave the edits in
+    /// place, flagged, for the user to resolve.
+    pub fn autosave(self: &Rc<Self>) {
+        if self.dirty.get() && auto_save() {
+            let _ = self.save(false);
+        }
+    }
+
+    /// Self-test: insert `text` at the end of 1-based `line`, as typing would.
+    pub fn selftest_edit(&self, line: i32, text: &str) {
+        if self.read_only.get() {
+            eprintln!("selftest: edit refused (read-only)");
+            return;
+        }
+        let buffer = self.view.buffer();
+        let mut it = buffer.iter_at_line(line - 1).unwrap_or_else(|| buffer.end_iter());
+        if !it.ends_line() {
+            it.forward_to_line_end();
+        }
+        buffer.insert(&mut it, text);
+        eprintln!("selftest: edit line {line} dirty={}", self.dirty.get());
+    }
+
+    pub fn selftest_undo(&self) {
+        let b = self.view.buffer();
+        eprintln!("selftest: undo can_undo={} can_redo={}", b.can_undo(), b.can_redo());
+        b.undo();
+    }
+
+    pub fn selftest_state(&self) -> String {
+        format!(
+            "dirty={} conflict={} read_only={} editable={}",
+            self.dirty.get(),
+            self.conflict.get(),
+            self.read_only.get(),
+            self.view.is_editable()
+        )
     }
 
     /// Click a task box to tick/untick it; the pointer becomes a hand over one.
@@ -454,6 +819,24 @@ impl CodeView {
     /// Flip `[ ]` ↔ `[x]` in the file on disk; the file monitor then reloads the view. Only if
     /// that line on disk is still what's shown (the AI may have just rewritten the file).
     fn toggle_task(&self, (line, col): (usize, usize)) {
+        if self.dirty.get() {
+            // Unsaved edits: what's on disk isn't what's shown, so the tick is one more edit.
+            let buffer = self.view.buffer();
+            let at = |c: usize| buffer.iter_at_line_index(line as i32, c as i32);
+            let (Some(open), Some(mut a), Some(mut b)) = (at(col), at(col + 1), at(col + 2)) else { return };
+            let mut close = b;
+            close.forward_char();
+            let shown = buffer.text(&open, &close, false);
+            if !matches!(shown.as_str(), "[ ]" | "[x]" | "[X]") {
+                return;
+            }
+            let ticked = if shown == "[ ]" { "x" } else { " " };
+            buffer.begin_user_action();
+            buffer.delete(&mut a, &mut b);
+            buffer.insert(&mut a, ticked);
+            buffer.end_user_action();
+            return;
+        }
         let path = self.path();
         let Some(shown) = self.text.borrow().as_deref().and_then(|t| t.split('\n').nth(line)).map(str::to_owned) else {
             return;
@@ -669,7 +1052,7 @@ impl CodeView {
 
     /// Recompute gutter markers (the git index changed: stage, commit, checkout).
     pub fn refresh_git(self: &Rc<Self>) {
-        let Some(text) = self.text.borrow().clone() else { return };
+        let Some(text) = self.current_text() else { return };
         let path = self.path();
         let cached = self.base.borrow().clone();
         let this = self.clone();
@@ -695,7 +1078,10 @@ impl CodeView {
             table.remove(&tag);
         }
         self.apply_colors();
-        if self.text.borrow().is_some() {
+        if self.dirty.get() {
+            // Re-reading the file would throw the edits away; color the buffer instead.
+            self.refresh_derived();
+        } else if self.text.borrow().is_some() {
             self.start_load(false);
         }
     }
@@ -716,6 +1102,7 @@ impl CodeView {
                 .await
                 .unwrap_or_else(|_| Loaded {
                     content: Content::Error("loader panicked".into()),
+                    lossy: false,
                     hl: None,
                     markers: vec![],
                     base: None,
@@ -740,20 +1127,50 @@ impl CodeView {
                 return;
             }
             other => {
+                if is_reload && self.dirty.get() {
+                    // Keep the edits; saving will say the file changed.
+                    self.conflict.set(true);
+                    self.emit();
+                    return;
+                }
                 let msg = match other {
                     Content::Binary => "This file is binary and is not displayed.".into(),
                     Content::TooLarge(n) => format!("This file is {:.1} MB, too large to display.", n as f64 / (1 << 20) as f64),
                     Content::Missing => "This file does not exist.".into(),
                     Content::Error(e) => format!("Cannot open file: {e}"),
-                    Content::Text(_) => unreachable!(),
+                    Content::Text(_) | Content::Lossy(_) => unreachable!(),
                 };
                 *self.text.borrow_mut() = None;
                 self.tasks.borrow_mut().clear();
-                buffer.set_text(&msg);
+                self.dirty.set(false);
+                self.conflict.set(false);
+                self.read_only.set(true);
+                self.view.set_editable(false);
+                self.view.set_cursor_visible(false);
+                self.programmatic(|b| b.set_text(&msg));
                 self.emit();
                 return;
             }
         };
+        if is_reload && self.dirty.get() {
+            // Unsaved edits are never replaced by a reload. If the file moved on from the
+            // version they were made against, saving will ask first.
+            if self.text.borrow().as_deref() != Some(&*text) {
+                self.conflict.set(true);
+            }
+            *self.base.borrow_mut() = loaded.base;
+            self.emit();
+            let f = self.on_reload.borrow().clone();
+            if let Some(f) = f {
+                f();
+            }
+            return;
+        }
+        self.conflict.set(false);
+        self.dirty.set(false);
+        self.read_only.set(loaded.lossy);
+        self.view.set_editable(!loaded.lossy);
+        self.view.set_cursor_visible(true);
 
         *self.base.borrow_mut() = loaded.base;
         *self.gutter.imp().markers.borrow_mut() = loaded.markers;
@@ -762,9 +1179,9 @@ impl CodeView {
         let unchanged = old.as_deref() == Some(&*text);
         let mut changed_lines = Vec::new();
         if is_reload && old.is_some() && !unchanged {
-            changed_lines = self.apply_diff(&text, &loaded.ops);
+            changed_lines = self.programmatic(|_| self.apply_diff(&text, &loaded.ops));
         } else if !unchanged || !is_reload {
-            buffer.set_text(&text);
+            self.programmatic(|b| b.set_text(&text));
             if !is_reload {
                 buffer.place_cursor(&buffer.start_iter());
             }

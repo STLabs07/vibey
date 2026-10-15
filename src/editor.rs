@@ -10,7 +10,7 @@ use std::rc::{Rc, Weak};
 use gtk::prelude::*;
 use gtk::glib;
 
-use crate::codeview::{CodeView, SharedStyle};
+use crate::codeview::{CodeView, Saved, SharedStyle};
 use crate::icons::{self, codicon};
 
 pub struct Tab {
@@ -18,6 +18,9 @@ pub struct Tab {
     widget: gtk::Box,
     icon: gtk::Label,
     label: gtk::Label,
+    /// ✕, or a dot while the file has unsaved edits (like VS Code).
+    close: gtk::Label,
+    hover: Cell<bool>,
     preview: Cell<bool>,
 }
 
@@ -28,6 +31,8 @@ pub struct Status {
     pub indentation: String,
     pub eol: &'static str,
     pub language: String,
+    /// "" when the file matches disk; otherwise what's unsaved or in conflict.
+    pub state: &'static str,
 }
 
 pub struct EditorGroup {
@@ -49,6 +54,10 @@ pub struct EditorGroup {
     on_tabs_changed: RefCell<Option<Rc<dyn Fn()>>>,
     git: RefCell<Rc<crate::git::Status>>,
     me: RefCell<Weak<EditorGroup>>,
+}
+
+fn tab_name(tab: &Tab) -> String {
+    tab.view.path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 fn icon_button(glyph: &str, tooltip: &str) -> gtk::Button {
@@ -248,6 +257,11 @@ impl EditorGroup {
             indentation: tab.view.indentation(),
             eol: tab.view.eol(),
             language: tab.view.language(),
+            state: match (tab.view.has_conflict(), tab.view.is_dirty()) {
+                (true, _) => "Changed on disk, not saved",
+                (false, true) => "Unsaved changes",
+                _ => "",
+            },
         })
     }
 
@@ -333,7 +347,25 @@ impl EditorGroup {
         widget.append(&label);
         widget.append(&close);
         widget.set_tooltip_text(Some(&path.to_string_lossy()));
-        let tab = Rc::new(Tab { view, widget, icon, label, preview: Cell::new(preview) });
+        let tab = Rc::new(Tab { view, widget, icon, label, close, hover: Cell::new(false), preview: Cell::new(preview) });
+
+        // Hovering swaps the unsaved dot for the ✕.
+        let motion = gtk::EventControllerMotion::new();
+        let weak_tab = Rc::downgrade(&tab);
+        motion.connect_enter(move |_, _, _| {
+            if let Some(t) = weak_tab.upgrade() {
+                t.hover.set(true);
+                Self::show_save_state(&t);
+            }
+        });
+        let weak_tab = Rc::downgrade(&tab);
+        motion.connect_leave(move |_| {
+            if let Some(t) = weak_tab.upgrade() {
+                t.hover.set(false);
+                Self::show_save_state(&t);
+            }
+        });
+        tab.widget.add_controller(motion);
 
         let me = self.me.borrow().clone();
         let weak_tab = Rc::downgrade(&tab);
@@ -371,11 +403,31 @@ impl EditorGroup {
             } else {
                 tab.widget.remove_css_class("deleted");
             }
+            Self::show_save_state(&tab);
             if g.active_tab().is_some_and(|a| Rc::ptr_eq(&a, &tab)) {
                 g.emit_status();
             }
         }));
         tab
+    }
+
+    /// Tab chrome for unsaved edits: a dot instead of the ✕, a warning color on conflict.
+    fn show_save_state(tab: &Tab) {
+        let (dirty, conflict) = (tab.view.is_dirty(), tab.view.has_conflict());
+        for (class, on) in [("dirty", dirty), ("conflict", conflict)] {
+            if on {
+                tab.widget.add_css_class(class);
+            } else {
+                tab.widget.remove_css_class(class);
+            }
+        }
+        tab.close.set_text(if dirty && !tab.hover.get() { codicon::CIRCLE_FILLED } else { codicon::CLOSE });
+        let path = tab.view.path().to_string_lossy().into_owned();
+        tab.widget.set_tooltip_text(Some(&match (conflict, dirty) {
+            (true, _) => format!("{path}\nThis file changed on disk after you started editing. Ctrl+S asks before replacing it."),
+            (false, true) => format!("{path}\nUnsaved changes"),
+            _ => path,
+        }));
     }
 
     fn index_of(&self, tab: &Rc<Tab>) -> Option<usize> {
@@ -394,6 +446,8 @@ impl EditorGroup {
         let Some(tab) = self.tabs.borrow().get(i).cloned() else { return };
         if let Some(prev) = self.active_tab() {
             prev.widget.remove_css_class("active");
+            // Leaving a file saves it, like leaving it with the keyboard does.
+            prev.view.autosave();
         }
         self.active.set(Some(i));
         tab.widget.add_css_class("active");
@@ -406,10 +460,94 @@ impl EditorGroup {
         self.tabs_changed();
     }
 
+    /// Close tab `i`. Unsaved edits are saved first (auto-save) or the user is asked; a
+    /// tab with edits never closes silently.
     pub fn close(&self, i: usize) {
-        if i >= self.tabs.borrow().len() {
+        let Some(tab) = self.tabs.borrow().get(i).cloned() else { return };
+        tab.view.autosave();
+        if !tab.view.is_dirty() {
+            self.remove(&tab);
             return;
         }
+        let name = tab_name(&tab);
+        let (me, t) = (self.me.borrow().clone(), tab.clone());
+        if tab.view.has_conflict() {
+            crate::dialog::confirm(
+                &format!("Discard your edits to {name}?"),
+                "The file changed on disk after you started editing, so your version was not saved. Closing keeps the version on disk.",
+                "Discard Edits",
+                move || {
+                    if let Some(g) = me.upgrade() {
+                        g.remove(&t);
+                    }
+                },
+            );
+        } else {
+            crate::dialog::confirm(
+                &format!("Save changes to {name}?"),
+                "Closing without saving loses them.",
+                "Save and Close",
+                move || {
+                    let Some(g) = me.upgrade() else { return };
+                    match t.view.save(false) {
+                        Saved::Done | Saved::Unchanged => g.remove(&t),
+                        other => g.save_failed(&t, other),
+                    }
+                },
+            );
+        }
+    }
+
+    /// Save the active file (Ctrl+S). If the file changed on disk since the edits began,
+    /// ask before replacing it.
+    pub fn save_active(&self) {
+        if let Some(t) = self.active_tab() {
+            let outcome = t.view.save(false);
+            self.save_failed(&t, outcome);
+        }
+    }
+
+    /// Explain a save that didn't happen (conflicts and errors); nothing for success.
+    fn save_failed(&self, tab: &Rc<Tab>, outcome: Saved) {
+        let name = tab_name(tab);
+        let (me, t) = (self.me.borrow().clone(), tab.clone());
+        match outcome {
+            Saved::Conflict => crate::dialog::confirm(
+                &format!("{name} changed on disk"),
+                "Something else, probably your AI CLI, changed this file after you started editing. Saving replaces its version with yours.",
+                "Overwrite",
+                move || {
+                    let outcome = t.view.save(true);
+                    match me.upgrade() {
+                        Some(g) if matches!(outcome, Saved::Failed(_)) => g.save_failed(&t, outcome),
+                        _ => {}
+                    }
+                },
+            ),
+            Saved::Failed(e) => crate::dialog::confirm(&format!("Couldn't save {name}"), &e, "Try Again", move || {
+                if let Some(g) = me.upgrade() {
+                    let outcome = t.view.save(false);
+                    g.save_failed(&t, outcome);
+                }
+            }),
+            Saved::Done | Saved::Unchanged | Saved::ReadOnly => {}
+        }
+    }
+
+    /// Save every open file with edits (auto-save: the window lost focus, a project closes).
+    pub fn autosave_all(&self) {
+        for v in self.views() {
+            v.autosave();
+        }
+    }
+
+    /// Names of files that still have edits that aren't on disk.
+    pub fn unsaved(&self) -> Vec<String> {
+        self.tabs.borrow().iter().filter(|t| t.view.is_dirty()).map(|t| tab_name(t)).collect()
+    }
+
+    fn remove(&self, tab: &Rc<Tab>) {
+        let Some(i) = self.index_of(tab) else { return };
         let tab = self.tabs.borrow_mut().remove(i);
         self.strip.remove(&tab.widget);
         self.stack.remove(&tab.view.widget);
@@ -554,6 +692,43 @@ impl EditorGroup {
             self.find_count.set_text(&format!("{i} of {n}"));
         }
     }
+
+    /// Self-test: edit, save and inspect the active file.
+    pub fn selftest(&self, cmd: &str, arg: &str) {
+        let Some(tab) = self.active_tab() else {
+            eprintln!("selftest: no active file");
+            return;
+        };
+        match cmd {
+            "edit" => {
+                let (line, text) = arg.split_once(' ').unwrap_or((arg, ""));
+                tab.view.selftest_edit(line.parse().unwrap_or(1), &text.replace("\\n", "\n"));
+            }
+            "save" => {
+                let outcome = tab.view.save(arg == "force");
+                eprintln!("selftest: save {outcome:?}");
+            }
+            "ctrls" => {
+                // The Ctrl+S path, including the dialog.
+                self.save_active();
+                eprintln!("selftest: ctrl+s confirm open={}", crate::dialog::is_open());
+            }
+            "autosave" => {
+                tab.view.autosave();
+                eprintln!("selftest: autosave {}", tab.view.selftest_state());
+            }
+            "focus" => tab.view.grab_focus(),
+            "undo" => tab.view.selftest_undo(),
+            "state" => eprintln!("selftest: file {}", tab.view.selftest_state()),
+            "close" => {
+                if let Some(i) = self.active.get() {
+                    self.close(i);
+                    eprintln!("selftest: tab closed={} confirm open={}", self.index_of(&tab).is_none(), crate::dialog::is_open());
+                }
+            }
+            other => eprintln!("selftest: unknown file command {other}"),
+        }
+    }
 }
 
 /// VS Code's empty editor watermark, with Vibey's shortcuts.
@@ -565,6 +740,7 @@ fn empty_hint() -> gtk::Box {
     for (what, keys) in [
         ("Go to File", "Ctrl + P"),
         ("Find in File", "Ctrl + F"),
+        ("Save File", "Ctrl + S"),
         ("Switch Project", "Ctrl + 1…9"),
         ("Close Tab", "Ctrl + W"),
         ("Toggle Terminal Focus", "Ctrl + `"),

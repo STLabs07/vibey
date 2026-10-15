@@ -36,7 +36,7 @@ data (no GObjects) and hand it back with `glib::MainContext::spawn_local` future
   initializes once, lazily, off-thread (`OnceLock`).
 - **Live reload**: GIO file monitor per open file → 60 ms debounce → Myers line diff off-thread →
   in-place buffer edits (scroll position kept) → changed lines flash, then fade over 1.5 s.
-- **Code view**: `GtkTextView` (read-only, selectable) plus a custom gutter widget for line numbers
+- **Code view**: `GtkTextView` (selectable; plain editing with atomic save, see SPEC 2026-10-15) plus a custom gutter widget for line numbers
   and git bars. Line height is matched to VS Code's (`round(14×1.35)=19px` × UI scale).
 - **Tree**: `GtkListView` + `GtkTreeListModel`, which is virtualized: only visible rows exist and
   directories are read on expand.
@@ -54,7 +54,7 @@ src/
   app.rs           window: rail, project pages, status bar, shortcuts, themes, close guard
   project.rs       per-project state (explorer, editor group, terminals), file index, Ctrl+P provider
   editor.rs        tab strip (preview semantics), breadcrumb, find widget, empty watermark
-  codeview.rs      read-only text view, gutter, live reload + diff + change flash, find
+  codeview.rs      text view (plain editing, save, conflict guard), gutter, live reload + diff + change flash, find
   highlight.rs     irosashi wrapper, bracket pair colorization, language names
   theme.rs         theme catalog/model, VS Code defaults, CSS + terminal colors
   quickopen.rs     VS Code-style quick pick (files, themes)

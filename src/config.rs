@@ -12,11 +12,14 @@ pub struct Config {
     pub renderer: String,
     /// Desktop notification when a terminal finishes while Vibey isn't focused.
     pub notifications: bool,
+    /// Save an edited file when focus leaves it (another tab, a terminal, another window) or
+    /// it's closed. Ctrl+S always saves.
+    pub auto_save: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { theme: crate::theme::DEFAULT_THEME.into(), renderer: "gpu".into(), notifications: true }
+        Config { theme: crate::theme::DEFAULT_THEME.into(), renderer: "gpu".into(), notifications: true, auto_save: true }
     }
 }
 

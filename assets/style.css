@@ -156,6 +156,11 @@ label.seti {
 .tab.active .close, .tab:hover .close { opacity: 0.85; }
 .tab.preview .tab-label { font-style: italic; }
 .tab.deleted .tab-label { text-decoration: line-through; color: @vs_gitDecoration_deletedResourceForeground; }
+/* Unsaved edits: a dot where the close button is (the X comes back on hover). */
+.tab.dirty .close { opacity: 1; font-size: {{~9}}; }
+.tab.dirty:hover .close { opacity: 0.85; font-size: {{~14}}; }
+/* The file changed on disk under the edits. */
+.tab.conflict .tab-label { color: @vs_gitDecoration_conflictingResourceForeground; }
 .breadcrumb {
   min-height: {{22}};
   padding-left: {{14}};

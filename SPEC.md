@@ -22,21 +22,35 @@ Changes from the brief are marked **[rev]**.
 - 2026-10-12, **terminal clipboard**: Ctrl+Shift+C/V, Ctrl+C copies while text is selected, and a
   right-click menu (Copy, Paste, Select All, Clear). Clear is only offered at a shell prompt.
 
+- 2026-10-15, **plain-text editing is in scope** (user directive: "sometimes we need to input api keys
+  when ai asks us to do that in files … thats required"). AI CLIs routinely ask the user to paste a key or
+  a value into `.env`, a config file, "the line below". Vibey now lets you click into any text file,
+  type, paste and undo, and save with Ctrl+S. Saving is also automatic when focus leaves the file (another
+  tab, a terminal, another window) or the tab closes (`auto_save` in config.toml, on by default).
+  Guard rails, because the AI is editing the same files: the write is atomic and keeps the file's
+  permissions (a `.env` stays 0600); if the file changed on disk after the edits began, Vibey doesn't
+  silently overwrite it (a "changed on disk" prompt appears on Ctrl+S, auto-save skips it, and the tab
+  turns warning-colored); a reload never replaces unsaved edits; files that aren't valid UTF-8 or contain
+  NUL stay read-only so they can't be corrupted; CRLF files stay CRLF. Still out: everything else an
+  editor does (see Hard scope).
+
 ## What this is
-A very lightweight, Linux-only, READ-ONLY "VS Code-shaped" window for people who code
-entirely through terminal AI CLIs (Claude Code, GPT CLIs, etc.). The AI edits the files;
-Vibey shows the project the way VS Code does and hosts the terminals. It is NOT an editor.
+A very lightweight, Linux-only "VS Code-shaped" window for people who code entirely through terminal
+AI CLIs (Claude Code, GPT CLIs, etc.). The AI edits the files; Vibey shows the project the way VS Code
+does and hosts the terminals. It is NOT an IDE: you can type into a file (to paste an API key, fix a
+value), but there are no editor features beyond that.
 
 VS Code uses 200–500 MB+ before any terminals. Vibey exists to give the same look at a
 fraction of the weight, with better multi-project / multi-terminal awareness.
 
 ## Hard scope
-IN: file tree, read-only syntax-highlighted code view with tabs, embedded terminals,
-multiple projects in one window, live file reload, git status display, resource monitoring,
-`vibey .` launcher, file finder (Ctrl+P), find in file (Ctrl+F), theme picker.
+IN: file tree, syntax-highlighted code view with tabs, plain-text editing and saving (type, paste,
+undo, Ctrl+S; see the 2026-10-15 log entry), embedded terminals, multiple projects in one window,
+live file reload, git status display, resource monitoring, `vibey .` launcher, file finder (Ctrl+P),
+find in file (Ctrl+F), theme picker.
 
-OUT, permanently: editing (except ticking Markdown task boxes, see the log), extensions/plugins,
-debugger, LSP, IntelliSense, search-and-replace.
+OUT, permanently: extensions/plugins, debugger, LSP, IntelliSense, autocomplete, search-and-replace,
+formatters, multi-cursor and other editor features. Editing stays a small utility.
 
 **[rev] Allowed, because they don't edit anything:** selecting and copying text in the code view,
 "Copy path" and "Copy relative path" in the tree, file finder, find in file. **Not decided yet:**
@@ -73,7 +87,7 @@ project-wide text search (Ctrl+Shift+F, read-only), "Open in $EDITOR". Ask befor
   branch, a git-dirty marker, a resource chip ("1.2 GB · 14%"), and an attention dot.
 - File TREE: Seti icons, indentation guides, expand/collapse, git colors (modified,
   untracked, added, deleted; ignored files dimmed).
-- Main area: tabbed read-only code view with line numbers, git gutter (added, modified and
+- Main area: tabbed code view (editable) with line numbers, git gutter (added, modified and
   deleted bars), breadcrumb, and smooth scrolling. On a disk change it reloads, keeps the scroll
   position, and briefly highlights the changed lines, which then fade out.
 - Terminal DOCK: several terminal tabs per project, splits optional. The cwd is the project

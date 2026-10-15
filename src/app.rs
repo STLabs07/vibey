@@ -42,6 +42,8 @@ pub struct App {
     res_label: gtk::Label,
     search_label: gtk::Label,
     status_right: gtk::Box,
+    /// "Unsaved changes" / "Changed on disk, not saved" for the shown file.
+    status_state: gtk::Label,
     status_pos: gtk::Label,
     status_indent: gtk::Label,
     status_eol: gtk::Label,
@@ -128,6 +130,7 @@ fn initials(name: &str) -> String {
 
 impl App {
     pub fn new(app: &gtk::Application, cfg: Config, ephemeral: bool) -> Rc<App> {
+        crate::codeview::set_auto_save(cfg.auto_save);
         let scale = ui_scale();
         let window = gtk::ApplicationWindow::builder()
             .application(app)
@@ -220,7 +223,8 @@ impl App {
         status.append(&sp);
         let status_right = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let (status_pos, status_indent, status_eol, status_lang) = (label("", ""), label("", ""), label("", ""), label("", ""));
-        for l in [&status_pos, &status_indent, &label("UTF-8", ""), &status_eol, &status_lang] {
+        let status_state = label("", "");
+        for l in [&status_state, &status_pos, &status_indent, &label("UTF-8", ""), &status_eol, &status_lang] {
             status_right.append(l);
         }
         status.append(&status_right);
@@ -268,6 +272,7 @@ impl App {
             res_label,
             search_label,
             status_right,
+            status_state,
             status_pos,
             status_indent,
             status_eol,
@@ -311,6 +316,10 @@ impl App {
         app_rc.window.connect_is_active_notify(move |w| {
             if let Some(a) = me.upgrade() {
                 a.update_visibility();
+                if !w.is_active() {
+                    // Alt-tab, lock screen: whatever was being typed is on disk.
+                    a.autosave_all();
+                }
                 if w.is_active() {
                     if let Some(p) = a.active_project() {
                         p.refresh_git();
@@ -359,6 +368,19 @@ impl App {
             }
         });
         b.append(&theme_btn);
+        b.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        let auto = gtk::CheckButton::with_label("Save edited files automatically");
+        auto.set_tooltip_text(Some("When you leave a file (another tab, the terminal, another window). Ctrl+S always saves."));
+        auto.set_active(self.config.borrow().auto_save);
+        let me = Rc::downgrade(self);
+        auto.connect_toggled(move |b| {
+            if let Some(a) = me.upgrade() {
+                a.config.borrow_mut().auto_save = b.is_active();
+                crate::codeview::set_auto_save(b.is_active());
+                config::save(&a.config.borrow());
+            }
+        });
+        b.append(&auto);
         b.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         b.append(&label("Renderer (applies on restart)", "dim"));
         let gpu = gtk::CheckButton::with_label("GPU (smoother)");
@@ -544,15 +566,24 @@ impl App {
 
     fn close_project(self: &Rc<Self>, i: usize) {
         let Some((project, _)) = self.projects.borrow().get(i).cloned() else { return };
+        project.editor.autosave_all();
         let jobs = project.running_jobs();
-        if jobs.is_empty() {
+        let unsaved = project.editor.unsaved();
+        if jobs.is_empty() && unsaved.is_empty() {
             self.remove_project(i);
             return;
+        }
+        let mut body = Vec::new();
+        if !jobs.is_empty() {
+            body.push(format!("Still running: {}. Closing the project stops them.", jobs.join(", ")));
+        }
+        if !unsaved.is_empty() {
+            body.push(format!("Not saved: {}. Closing the project discards those edits.", unsaved.join(", ")));
         }
         let me = Rc::downgrade(self);
         self.confirm(
             &format!("Close {}?", project.name),
-            &format!("Still running: {}. Closing the project stops them.", jobs.join(", ")),
+            &body.join(" "),
             "Close Project",
             move || {
                 if let Some(a) = me.upgrade() {
@@ -605,21 +636,30 @@ impl App {
                 a.save_session();
                 return glib::Propagation::Proceed;
             }
+            a.autosave_all();
             let jobs: Vec<String> = a
                 .projects
                 .borrow()
                 .iter()
                 .flat_map(|(p, _)| p.running_jobs().into_iter().map(|j| format!("{j} ({})", p.name)).collect::<Vec<_>>())
                 .collect();
-            if jobs.is_empty() {
+            let unsaved = a.unsaved_files();
+            if jobs.is_empty() && unsaved.is_empty() {
                 a.save_session();
                 return glib::Propagation::Proceed;
+            }
+            let mut body = Vec::new();
+            if !jobs.is_empty() {
+                body.push(format!("Still running: {}. Closing Vibey stops them.", jobs.join(", ")));
+            }
+            if !unsaved.is_empty() {
+                body.push(format!("Not saved: {}. Closing Vibey discards those edits.", unsaved.join(", ")));
             }
             let w = w.clone();
             let me2 = Rc::downgrade(&a);
             a.confirm(
                 "Close Vibey?",
-                &format!("Still running: {}. Closing Vibey stops them.", jobs.join(", ")),
+                &body.join(" "),
                 "Close Anyway",
                 move || {
                     if let Some(a) = me2.upgrade() {
@@ -649,6 +689,22 @@ impl App {
             }
         }
         self.update_badges();
+    }
+
+    /// Save every open file with edits, in all projects (auto-save).
+    pub fn autosave_all(&self) {
+        for (p, _) in self.projects.borrow().iter() {
+            p.editor.autosave_all();
+        }
+    }
+
+    /// Names of files with edits that couldn't be saved, as "name (project)".
+    fn unsaved_files(&self) -> Vec<String> {
+        self.projects
+            .borrow()
+            .iter()
+            .flat_map(|(p, _)| p.editor.unsaved().into_iter().map(|f| format!("{f} ({})", p.name)).collect::<Vec<_>>())
+            .collect()
     }
 
     /// Only the active project's panel is "visible", and only while the window is focused.
@@ -872,6 +928,14 @@ impl App {
         }
     }
 
+    /// Self-test: `edit`, `save`, `autosave`, `state`, … on the active project's open file.
+    pub fn selftest_file(&self, cmd: &str, arg: &str) {
+        match self.active_project() {
+            Some(p) => p.editor.selftest(cmd, arg),
+            None => eprintln!("selftest: no project"),
+        }
+    }
+
     /// Self-test: open the right-click menu of rail project `i` (1-based) and, with `choose`,
     /// pick "Close Project". Reports whether the shared popover stays parented and realized.
     pub fn selftest_project_menu(self: &Rc<Self>, i: usize, choose: bool) {
@@ -927,6 +991,8 @@ impl App {
     fn show_status(&self, st: Option<Status>) {
         self.status_right.set_visible(st.is_some());
         if let Some(st) = st {
+            self.status_state.set_text(st.state);
+            self.status_state.set_visible(!st.state.is_empty());
             self.status_pos.set_text(&format!("Ln {}, Col {}", st.line, st.col));
             self.status_indent.set_text(&st.indentation);
             self.status_eol.set_text(st.eol);
@@ -1089,6 +1155,12 @@ impl App {
                 true
             }
             _ if in_terminal => false,
+            Key::s if !shift => {
+                if let Some(p) = project {
+                    p.editor.save_active();
+                }
+                true
+            }
             Key::r if shift => {
                 self.toggle_resources();
                 true

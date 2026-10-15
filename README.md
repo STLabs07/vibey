@@ -1,9 +1,10 @@
 # Vibey
 
-A lightweight, read-only, VS Code-shaped window for people who code through terminal AI
-CLIs (Claude Code and similar). The AI edits the files. Vibey shows your projects the way VS Code
-does, with VS Code's own themes, icons and syntax colors, and hosts the terminals, at about a
-seventh of the memory.
+A lightweight, VS Code-shaped window for people who code through terminal AI CLIs (Claude
+Code and similar). The AI edits the files. Vibey shows your projects the way VS Code does, with
+VS Code's own themes, icons and syntax colors, and hosts the terminals, at about a seventh of the
+memory. When the AI asks you to put something in a file (an API key on the line below, a value in
+`.env`), click in the file, type or paste, and press Ctrl+S.
 
 Linux only. Rust + GTK4 + VTE. MIT licensed. See [SPEC.md](SPEC.md) for scope and
 [PLAN.md](PLAN.md) for architecture and measurements.
@@ -53,6 +54,8 @@ folders are restored on the next start.
 | Ctrl+Shift+F | Project search: the box at the top of the Explorer searches file names and file contents; click a result to jump to the line |
 | Alt+1 … 9 | Switch terminal (tabs are numbered) |
 | Ctrl+1 … 9 | Switch project |
+| Ctrl+S | Save the open file. Files also save when you leave them (another tab, a terminal, another window) |
+| Ctrl+Z / Ctrl+Shift+Z | Undo / redo in the open file |
 | Ctrl+W, Ctrl+Tab, Ctrl+PageUp/Down | Close tab, cycle tabs |
 | Ctrl+` / Ctrl+Shift+` | Toggle focus editor ↔ terminal / new terminal |
 | Ctrl+K Ctrl+T | Color theme picker (live preview, Escape reverts) |
@@ -74,6 +77,13 @@ Git status shows the way VS Code shows it: colored tree entries with M/U/A lette
 bars against the staged version, `main*` and ↓/↑ in the status bar, and a dirty dot on the
 project's rail avatar. Vibey only ever runs `git --no-optional-locks …`, so it never blocks
 your AI CLI's commits.
+
+Editing is deliberately plain: type, paste, undo, save. A dot on the tab means unsaved edits;
+the status bar says so too. Vibey writes atomically and keeps the file's permissions (a `.env`
+stays private). If your AI CLI changed the file after you started editing, Vibey doesn't overwrite it
+silently: the tab turns orange, auto-save skips it, and Ctrl+S asks first. Files that aren't UTF-8
+or are binary stay read-only. Turn off automatic saving in the gear menu or with `auto_save = false`
+in `~/.config/vibey/config.toml`.
 
 Click in the tree opens a preview tab (italic, replaced by the next click). Double-click pins it.
 When a file changes on disk, its tab updates in place and the changed lines flash, then fade.
