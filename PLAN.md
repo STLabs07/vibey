@@ -59,7 +59,8 @@ src/
   theme.rs         theme catalog/model, VS Code defaults, CSS + terminal colors
   quickopen.rs     VS Code-style quick pick (files, themes)
   fuzzy.rs         fzf-style path scorer
-  tree.rs          file tree (TreeListModel + GtkDirectoryList)
+  tree.rs          file tree (TreeListModel over dirlist.rs)
+  dirlist.rs       per-directory ListStore: GIO listing + monitor, weak-ref async (not GtkDirectoryList)
   terminal.rs      terminal panel (VTE), foreground-job detection
   icons.rs         Seti + Codicon fonts and lookups
   config.rs        ~/.config/vibey/config.toml
@@ -120,8 +121,9 @@ Differences:
 ### Findings that change the plan
 - Seti ships as **WOFF, which HarfBuzz/Pango can't load** (fontconfig can, which hides the problem).
   It is now bundled as TTF.
-- `GtkDirectoryList` already watches *only expanded* directories through GIO (inotify), which is
-  exactly the watching policy in the spec. Proposal: use GIO file monitors for open files too and
+- Watching *only expanded* directories through GIO (inotify) is exactly the watching policy in the
+  spec. `GtkDirectoryList` did this but crashes on GTK 4.14.5 (use-after-free of its queued monitor
+  events when a folder is collapsed mid-event), so `dirlist.rs` does the same with weak refs. Proposal: use GIO file monitors for open files too and
   drop the `notify` crate. That means one less dependency and no extra thread. Needs approval
   (stack change).
 - `TreeListRow::is_expandable()` must not be used: it creates (lists + monitors) collapsed folders' models.

@@ -161,6 +161,10 @@ impl Project {
         project
     }
 
+    pub fn tree(&self) -> Option<&Rc<Tree>> {
+        self.tree.get()
+    }
+
     pub fn set_on_git(&self, f: Rc<dyn Fn()>) {
         *self.on_git.borrow_mut() = Some(f);
     }

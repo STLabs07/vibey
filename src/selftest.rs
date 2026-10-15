@@ -6,7 +6,8 @@
 //!
 //! Commands: `term TEXT` (typed into the shown terminal + Enter), `wait MS`, `key SPEC` (e.g. ctrl+shift+grave), `type TEXT` (quick pick or
 //! find box), `enter`, `down`, `escape`, `find TEXT`, `project N`, `theme ID`,
-//! `exec SHELL…`, `shot FILE`, `mem`, `close`, `answer yes|no`, `hover N`, `quit`.
+//! `exec SHELL…`, `shot FILE`, `mem`, `close`, `answer yes|no`, `hover N`, `tree expand|collapse REL | rows | flap REL N`,
+//! `quit`.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -69,6 +70,11 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
         "tsel" => {
             if let Some(p) = app.active_project() {
                 p.terminals.selftest(arg);
+            }
+        }
+        "tree" => {
+            if let Some(t) = app.active_project().and_then(|p| p.tree().cloned()) {
+                t.selftest(arg);
             }
         }
         "tick" => {

@@ -2,6 +2,7 @@ mod app;
 mod codeview;
 mod config;
 mod dialog;
+mod dirlist;
 mod editor;
 mod fuzzy;
 mod git;

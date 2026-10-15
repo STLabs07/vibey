@@ -1,5 +1,5 @@
 //! File tree: a virtualized GtkListView over a lazily-expanded GtkTreeListModel.
-//! Directories are only listed (and watched, via GtkDirectoryList) while expanded.
+//! Directories are only listed (and watched, via `dirlist`) while expanded.
 //! Rows carry VS Code's git decorations: color + a letter badge.
 
 use std::cell::RefCell;
@@ -9,6 +9,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 use gtk::{gio, glib};
 
+use crate::dirlist;
 use crate::git;
 use crate::icons::{self, codicon};
 
@@ -25,6 +26,7 @@ fn file_of(info: &gio::FileInfo) -> Option<gio::File> {
 
 pub struct Tree {
     pub widget: gtk::ScrolledWindow,
+    root: PathBuf,
     status: RefCell<Rc<git::Status>>,
     /// Every row widget the factory created (rows are recycled, so this stays small).
     rows: RefCell<Vec<glib::WeakRef<gtk::TreeExpander>>>,
@@ -37,6 +39,7 @@ impl Tree {
     pub fn new(root: &Path, on_open: Rc<dyn Fn(PathBuf, bool)>, on_dir_changed: Rc<dyn Fn()>) -> Rc<Tree> {
         let tree = Rc::new(Tree {
             widget: gtk::ScrolledWindow::builder().vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build(),
+            root: root.to_path_buf(),
             status: RefCell::new(Rc::new(git::Status::default())),
             rows: RefCell::new(Vec::new()),
             on_dir_changed,
@@ -77,14 +80,8 @@ impl Tree {
     }
 
     fn dir_model(&self, dir: &gio::File) -> gio::ListModel {
-        let list = gtk::DirectoryList::new(Some("standard::name,standard::display-name,standard::type"), Some(dir));
-        let cb = self.on_dir_changed.clone();
-        list.connect_items_changed(move |l, _, removed, added| {
-            // Ignore the initial listing; react to later creations/deletions.
-            if !l.is_loading() && (removed > 0 || added > 0) {
-                cb();
-            }
-        });
+        // Reacts to later creations/deletions, not to the initial listing.
+        let list = dirlist::open(dir, self.on_dir_changed.clone());
         let filter = gtk::CustomFilter::new(|obj| {
             let info = obj.downcast_ref::<gio::FileInfo>().unwrap();
             !HIDDEN.iter().any(|h| info.name().as_os_str() == *h)
@@ -180,6 +177,59 @@ impl Tree {
             Some(_) if dir => "•",
             Some(k) => k.letter(),
         });
+    }
+
+    /// Self-test hook, so expansion can be driven without input events:
+    /// `expand REL`, `collapse REL`, `rows`, and `flap REL N` (toggle REL every 2 ms, N times).
+    pub fn selftest(self: &Rc<Self>, arg: &str) {
+        let Some(model) = self
+            .widget
+            .child()
+            .and_downcast::<gtk::ListView>()
+            .and_then(|l| l.model())
+            .and_downcast::<gtk::SingleSelection>()
+            .and_then(|s| s.model())
+            .and_downcast::<gtk::TreeListModel>()
+        else {
+            return;
+        };
+        let (cmd, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+        let (rel, n) = rest.split_once(' ').unwrap_or((rest, ""));
+        let find = {
+            let (model, target) = (model.clone(), self.root.join(rel));
+            move || {
+                (0..model.n_items()).filter_map(|i| model.row(i)).find(|r| {
+                    r.item()
+                        .and_downcast::<gio::FileInfo>()
+                        .and_then(|i| file_of(&i))
+                        .and_then(|f| f.path())
+                        .is_some_and(|p| p == target)
+                })
+            }
+        };
+        match cmd {
+            "expand" | "collapse" => {
+                if let Some(r) = find() {
+                    r.set_expanded(cmd == "expand");
+                }
+            }
+            "rows" => eprintln!("selftest: tree rows={}", model.n_items()),
+            "flap" => {
+                let left = std::cell::Cell::new(n.parse::<u32>().unwrap_or(1000));
+                glib::timeout_add_local(std::time::Duration::from_millis(2), move || {
+                    if let Some(r) = find() {
+                        r.set_expanded(!r.is_expanded());
+                    }
+                    left.set(left.get().saturating_sub(1));
+                    if left.get() == 0 {
+                        eprintln!("selftest: tree flap done rows={}", model.n_items());
+                        return glib::ControlFlow::Break;
+                    }
+                    glib::ControlFlow::Continue
+                });
+            }
+            _ => {}
+        }
     }
 
     pub fn set_status(&self, status: Rc<git::Status>) {
