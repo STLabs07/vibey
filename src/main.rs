@@ -8,6 +8,7 @@ mod fuzzy;
 mod git;
 mod highlight;
 mod icons;
+mod menu;
 mod procmon;
 mod project;
 mod quickopen;

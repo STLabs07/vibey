@@ -7,7 +7,7 @@
 //! Commands: `term TEXT` (typed into the shown terminal + Enter), `wait MS`, `key SPEC` (e.g. ctrl+shift+grave), `type TEXT` (quick pick or
 //! find box), `enter`, `down`, `escape`, `find TEXT`, `project N`, `theme ID`,
 //! `exec SHELL…`, `shot FILE`, `mem`, `close`, `answer yes|no`, `hover N`, `tree expand|collapse REL | rows | flap REL N`,
-//! `quit`.
+//! `pmenu N [close]`, `quit`.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -100,6 +100,11 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
             eprintln!("selftest: confirm open={}", crate::dialog::is_open());
         }
         "hover" => app.hover_rail(arg.parse().unwrap_or(1)),
+        // `pmenu N` opens project N's right-click menu and dismisses it; `pmenu N close` picks Close Project.
+        "pmenu" => {
+            let (n, how) = arg.split_once(' ').unwrap_or((arg, ""));
+            app.selftest_project_menu(n.parse().unwrap_or(1), how == "close");
+        }
         "exec" => {
             let ok = std::process::Command::new("sh").args(["-c", arg]).status().is_ok_and(|s| s.success());
             eprintln!("selftest: exec ok={ok}");

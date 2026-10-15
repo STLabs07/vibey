@@ -13,6 +13,7 @@ use crate::codeview::{SharedStyle, ViewStyle};
 use crate::config::{self, Config};
 use crate::editor::Status;
 use crate::icons::codicon;
+use crate::menu::ContextMenu;
 use crate::project::{FileProvider, Project};
 use crate::procmon::{self, Prev};
 use crate::quickopen::{self, Item, Provider, QuickPick};
@@ -53,6 +54,8 @@ pub struct App {
     quick: Rc<QuickPick>,
     /// Kept alive here; reached through `dialog::confirm`.
     _confirm: Rc<crate::dialog::Confirm>,
+    /// Right-click menu of a rail project; one popover for the life of the window.
+    project_menu: Rc<ContextMenu>,
     resources: Rc<ResourcePanel>,
     prev_sample: RefCell<Prev>,
     sampling: Cell<bool>,
@@ -239,6 +242,9 @@ impl App {
         let confirm = crate::dialog::Confirm::new(scale, &outer);
         overlay.add_overlay(&confirm.widget);
         window.set_child(Some(&overlay));
+        // Right-click menus: created once, parented to the window content, never unparented.
+        let project_menu = ContextMenu::new(&outer, &[("Close Project", "", false)]);
+        crate::terminal::install_menu(&outer);
 
         let style = Rc::new(RefCell::new(ViewStyle {
             theme_id: String::new(),
@@ -273,6 +279,7 @@ impl App {
             config: RefCell::new(cfg),
             quick,
             _confirm: confirm,
+            project_menu,
             resources,
             prev_sample: RefCell::new(Prev::default()),
             sampling: Cell::new(false),
@@ -449,24 +456,35 @@ impl App {
         item.append(&chip);
         let click = gtk::GestureClick::new();
         click.set_button(0);
+        // Weak: the controller lives on `item`, so a strong clone would keep a closed
+        // project's widgets alive forever.
         let me = Rc::downgrade(self);
         let weak_p = Rc::downgrade(&project);
-        let it = item.clone();
+        let it = item.downgrade();
         click.connect_pressed(move |g, _, x, y| {
+            let Some(it) = it.upgrade() else { return };
             // A Box has no :active state of its own; set it for the press feedback.
             it.set_state_flags(gtk::StateFlags::ACTIVE, false);
             let (Some(a), Some(p)) = (me.upgrade(), weak_p.upgrade()) else { return };
             let Some(i) = a.index_of(&p) else { return };
             if g.current_button() == 3 {
-                a.project_menu(i, &it, x, y);
+                a.project_menu(&p, &it, x, y);
             } else {
                 a.activate(i);
             }
         });
-        let it = item.clone();
-        click.connect_released(move |_, _, _, _| it.unset_state_flags(gtk::StateFlags::ACTIVE));
-        let it = item.clone();
-        click.connect_stopped(move |_| it.unset_state_flags(gtk::StateFlags::ACTIVE));
+        let it = item.downgrade();
+        click.connect_released(move |_, _, _, _| {
+            if let Some(it) = it.upgrade() {
+                it.unset_state_flags(gtk::StateFlags::ACTIVE);
+            }
+        });
+        let it = item.downgrade();
+        click.connect_stopped(move |_| {
+            if let Some(it) = it.upgrade() {
+                it.unset_state_flags(gtk::StateFlags::ACTIVE);
+            }
+        });
         item.add_controller(click);
         self.rail_projects.append(&item);
         self.projects.borrow_mut().push((project.clone(), item));
@@ -512,27 +530,16 @@ impl App {
         }
     }
 
-    fn project_menu(self: &Rc<Self>, i: usize, anchor: &gtk::Box, x: f64, y: f64) {
-        let pop = gtk::Popover::new();
-        pop.set_parent(anchor);
-        pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-        pop.set_position(gtk::PositionType::Right);
-        let b = gtk::Button::with_label("Close Project");
-        b.add_css_class("flat");
+    fn project_menu(self: &Rc<Self>, project: &Rc<Project>, anchor: &gtk::Box, x: f64, y: f64) {
         let me = Rc::downgrade(self);
-        let p = pop.clone();
-        b.connect_clicked(move |_| {
-            p.popdown();
-            if let Some(a) = me.upgrade() {
+        let project = Rc::downgrade(project);
+        self.project_menu.show(anchor, x, y, &[true], move |_| {
+            // Looked up at click time: the rail may have changed while the menu was open.
+            let (Some(a), Some(p)) = (me.upgrade(), project.upgrade()) else { return };
+            if let Some(i) = a.index_of(&p) {
                 a.close_project(i);
             }
         });
-        pop.set_child(Some(&b));
-        pop.connect_closed(|p| {
-            let p = p.clone();
-            glib::idle_add_local_once(move || p.unparent());
-        });
-        pop.popup();
     }
 
     fn close_project(self: &Rc<Self>, i: usize) {
@@ -863,6 +870,29 @@ impl App {
         if let Some(w) = w {
             w.set_state_flags(gtk::StateFlags::PRELIGHT, false);
         }
+    }
+
+    /// Self-test: open the right-click menu of rail project `i` (1-based) and, with `choose`,
+    /// pick "Close Project". Reports whether the shared popover stays parented and realized.
+    pub fn selftest_project_menu(self: &Rc<Self>, i: usize, choose: bool) {
+        let target = self.projects.borrow().get(i.wrapping_sub(1)).map(|(p, b)| (p.clone(), b.clone()));
+        let Some((project, item)) = target else { return };
+        self.project_menu(&project, &item, 10.0, 10.0);
+        let pop = self.project_menu.popover().clone();
+        eprintln!("selftest: project menu open={}", pop.is_visible());
+        if choose {
+            self.project_menu.choose(0);
+        } else {
+            pop.popdown();
+        }
+        glib::timeout_add_local_once(Duration::from_millis(150), move || {
+            eprintln!(
+                "selftest: project menu closed={} kept parent={} realized={}",
+                !pop.is_visible(),
+                pop.parent().is_some(),
+                pop.is_realized()
+            );
+        });
     }
 
     pub fn toggle_resources(self: &Rc<Self>) {

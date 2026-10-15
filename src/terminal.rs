@@ -18,6 +18,7 @@ use gtk::{gio, glib, pango};
 use vte4::prelude::*;
 
 use crate::icons::codicon;
+use crate::menu::{self, ContextMenu};
 use crate::procmon::process_name;
 use crate::theme::ThemeModel;
 
@@ -568,7 +569,7 @@ impl TerminalPanel {
             }
             "menu" => {
                 let path = arg.to_string();
-                let pop = context_menu(&t, 40.0, 40.0);
+                let Some(pop) = context_menu(&t, 40.0, 40.0).map(|m| m.popover().clone()) else { return };
                 glib::timeout_add_local_once(Duration::from_millis(400), move || {
                     let mut b = pop.child().and_then(|c| c.first_child());
                     while let Some(w) = b {
@@ -590,6 +591,10 @@ impl TerminalPanel {
                         }
                     }
                     pop.popdown();
+                    // The menu must outlive its use, parented and realized (see `menu`).
+                    glib::timeout_add_local_once(Duration::from_millis(150), move || {
+                        eprintln!("selftest: menu kept parent={} realized={}", pop.parent().is_some(), pop.is_realized());
+                    });
                 });
             }
             _ => eprintln!("selftest: unknown terminal command {cmd}"),
@@ -669,57 +674,39 @@ fn clear(term: &vte4::Terminal) {
     term.feed_child(b"\x0c");
 }
 
-fn context_menu(t: &Rc<Term>, x: f64, y: f64) -> gtk::Popover {
-    let pop = gtk::Popover::new();
-    pop.set_has_arrow(false);
-    pop.set_position(gtk::PositionType::Bottom);
-    pop.set_halign(gtk::Align::Start);
-    pop.add_css_class("menu-popover");
-    pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-    let b = gtk::Box::new(gtk::Orientation::Vertical, 0);
+/// The right-click menu's rows; `context_menu` enables them in this order.
+const MENU: [menu::Entry; 4] = [
+    ("Copy", "Ctrl+Shift+C", false),
+    ("Paste", "Ctrl+Shift+V", false),
+    ("Select All", "", false),
+    ("Clear", "", true),
+];
+
+thread_local! {
+    static CONTEXT_MENU: RefCell<Option<Rc<ContextMenu>>> = const { RefCell::new(None) };
+}
+
+/// Create the terminals' right-click menu, parented to `parent` (the window content) for the
+/// life of the window. It is shared by every terminal and never unparented; see `menu`.
+pub fn install_menu(parent: &impl IsA<gtk::Widget>) {
+    CONTEXT_MENU.with(|m| *m.borrow_mut() = Some(ContextMenu::new(parent, &MENU)));
+}
+
+fn context_menu(t: &Rc<Term>, x: f64, y: f64) -> Option<Rc<ContextMenu>> {
+    let menu = CONTEXT_MENU.with(|m| m.borrow().clone())?;
     // A reset under a running program (an AI CLI, vim) would scramble its screen, so Clear
     // is only offered at a shell prompt.
     let at_prompt = t.foreground_pgid().is_none();
-    let items: [(&str, &str, bool, fn(&vte4::Terminal)); 4] = [
-        ("Copy", "Ctrl+Shift+C", t.term.has_selection(), copy),
-        ("Paste", "Ctrl+Shift+V", true, |t| t.paste_clipboard()),
-        ("Select All", "", true, |t| t.select_all()),
-        ("Clear", "", at_prompt, clear),
-    ];
-    for (name, accel, enabled, action) in items {
-        if name == "Clear" {
-            b.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let enabled = [t.term.has_selection(), true, true, at_prompt];
+    let actions: [fn(&vte4::Terminal); 4] = [copy, |t| t.paste_clipboard(), |t| t.select_all(), clear];
+    let term = t.term.downgrade();
+    menu.show(&t.term, x, y, &enabled, move |i| {
+        if let Some(term) = term.upgrade() {
+            actions[i](&term);
+            term.grab_focus();
         }
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 24);
-        let label = gtk::Label::new(Some(name));
-        label.set_hexpand(true);
-        label.set_xalign(0.0);
-        row.append(&label);
-        let keys = gtk::Label::new(Some(accel));
-        keys.add_css_class("accel");
-        row.append(&keys);
-        let btn = gtk::Button::builder().child(&row).sensitive(enabled).build();
-        btn.add_css_class("flat");
-        btn.add_css_class("menu-item");
-        let (p, term) = (pop.clone(), t.term.downgrade());
-        btn.connect_clicked(move |_| {
-            p.popdown();
-            if let Some(term) = term.upgrade() {
-                action(&term);
-                term.grab_focus();
-            }
-        });
-        b.append(&btn);
-    }
-    pop.set_child(Some(&b));
-    pop.set_parent(&t.term);
-    // Unparent after the click handler that closed it has finished.
-    pop.connect_closed(|p| {
-        let p = p.clone();
-        glib::idle_add_local_once(move || p.unparent());
     });
-    pop.popup();
-    pop
+    Some(menu)
 }
 
 fn apply_colors(term: &vte4::Terminal, theme: &ThemeModel) {
