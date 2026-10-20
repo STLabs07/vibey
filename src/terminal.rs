@@ -554,7 +554,7 @@ impl TerminalPanel {
         }
     }
 
-    /// Self-test hooks: `select`, `clear`, `copy` (prints the clipboard), `menu <png>` (prints the items).
+    /// Self-test hooks: `select`, `clear`, `copy` (prints the clipboard), `menu <png> [hovered row]` (prints the items).
     pub fn selftest(&self, cmd: &str) {
         let Some(t) = self.terms.borrow().get(self.active.get()).cloned() else { return };
         let (cmd, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
@@ -568,9 +568,23 @@ impl TerminalPanel {
                 });
             }
             "menu" => {
-                let path = arg.to_string();
+                let (path, hover) = arg.split_once(' ').unwrap_or((arg, ""));
+                let (path, hover) = (path.to_string(), hover.parse::<usize>().ok());
                 let Some(pop) = context_menu(&t, 40.0, 40.0).map(|m| m.popover().clone()) else { return };
-                glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                // Hover has to be in place before the popover's first frame.
+                let mut row = 0;
+                let mut b = pop.child().and_then(|c| c.first_child());
+                while let Some(w) = b {
+                    if w.is::<gtk::Button>() {
+                        if hover == Some(row) {
+                            w.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+                        }
+                        row += 1;
+                    }
+                    b = w.next_sibling();
+                }
+                // The hover highlight fades in; give it time before the snapshot.
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                     let mut b = pop.child().and_then(|c| c.first_child());
                     while let Some(w) = b {
                         if let Some(btn) = w.downcast_ref::<gtk::Button>() {
