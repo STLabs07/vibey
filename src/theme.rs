@@ -487,6 +487,17 @@ impl ThemeModel {
         (self.get("terminal.foreground"), self.get("terminal.background"), palette)
     }
 
+    /// Find-in-file highlights: (every match, the current match). Themes often define these as
+    /// a faint wash (Vitesse's current match is 13% yellow, dimmer than the others), so keep
+    /// their hue but never let them be less than clearly visible, the current one strongest.
+    pub fn find_colors(&self) -> (Rgba, Rgba) {
+        let at_least = |c: Rgba, a: u8| Rgba { a: c.a.max(a), ..c };
+        (
+            at_least(self.get("editor.findMatchHighlightBackground"), 0x77),
+            at_least(self.get("editor.findMatchBackground"), 0xA0),
+        )
+    }
+
     /// Bracket pair colorization: 3 cycling colors + the unmatched-bracket color.
     pub fn bracket_colors(&self) -> highlight::BracketColors {
         let c = |k: &str| {

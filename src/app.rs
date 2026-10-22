@@ -1037,8 +1037,7 @@ impl App {
             st.brackets = Arc::new(model.bracket_colors());
             st.line_number = model.get("editorLineNumber.foreground");
             st.changed = model.get("diffEditor.insertedLineBackground");
-            st.find_match = model.get("editor.findMatchHighlightBackground");
-            st.find_current = model.get("editor.findMatchBackground");
+            (st.find_match, st.find_current) = model.find_colors();
             st.git_added = model.get("editorGutter.addedBackground");
             st.git_modified = model.get("editorGutter.modifiedBackground");
             st.git_deleted = model.get("editorGutter.deletedBackground");
