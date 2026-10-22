@@ -678,11 +678,17 @@ impl App {
         // Terminal activity (an AI CLI working, a command finishing) usually means files changed.
         project.refresh_git();
         self.schedule_save();
-        if let crate::terminal::Event::Finished(job) = &ev {
+        if let crate::terminal::Event::Attention(job, why) = &ev {
             let unfocused = !self.window.is_active();
             if unfocused && self.config.borrow().notifications {
-                let n = gio::Notification::new(&format!("{job} finished in {}", project.name));
-                n.set_body(Some("Vibey: a terminal went quiet while you were away."));
+                use crate::terminal::Why;
+                let (verb, body) = match why {
+                    Why::Exited => ("finished", "Back at the prompt."),
+                    Why::Bell => ("needs you", "It's waiting for your input."),
+                    Why::Stopped => ("stopped", "Finished, or waiting on you."),
+                };
+                let n = gio::Notification::new(&format!("{job} {verb} in {}", project.name));
+                n.set_body(Some(body));
                 if let Some(app) = self.window.application() {
                     app.send_notification(Some(&format!("finished-{}", project.name)), &n);
                 }

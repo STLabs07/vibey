@@ -5,7 +5,9 @@
 //! arms one quiet-timer; when output stops for `QUIET`, it's idle again. A busy stretch of at
 //! least `SUSTAINED` (an AI CLI working, a long build) that ends while the user isn't
 //! looking at that terminal leaves it "finished, unseen". So does a bell, or a long-running
-//! foreground job exiting.
+//! foreground job exiting. Output the user caused (typing echo, a TUI redrawing as they type)
+//! isn't work: a busy stretch only counts from the last input, so typing for a while and then
+//! alt-tabbing away doesn't look like something finished.
 
 use std::cell::{Cell, RefCell};
 use std::os::fd::AsRawFd;
@@ -26,6 +28,8 @@ use crate::theme::ThemeModel;
 const QUIET: Duration = Duration::from_millis(1500);
 /// Busy for at least this long before going quiet → worth telling the user.
 const SUSTAINED: Duration = Duration::from_secs(3);
+/// A job ending this soon after the user typed was ended by them (`q`, `/exit`, Ctrl+C).
+const USER_DRIVEN: Duration = Duration::from_secs(3);
 /// Re-read the foreground process at most this often while output streams.
 const JOB_CHECK: Duration = Duration::from_millis(400);
 
@@ -33,7 +37,7 @@ const JOB_CHECK: Duration = Duration::from_millis(400);
 pub enum State {
     Idle,
     Running,
-    /// Finished (or rang the bell) while the user was looking elsewhere.
+    /// Stopped (exited, rang the bell, went quiet after real work) while the user was looking elsewhere.
     Attention,
 }
 
@@ -51,7 +55,14 @@ struct Term {
     state: Cell<State>,
     last_output: Cell<Instant>,
     busy_since: Cell<Option<Instant>>,
+    last_input: Cell<Option<Instant>>,
     timer_armed: Cell<bool>,
+    /// Told the user about this terminal and they haven't looked at it since: output that
+    /// arrives and settles again meanwhile must not raise another alert.
+    alerted: Cell<bool>,
+    /// How many alerts this terminal has raised, and the latest reason (self-test).
+    alerts: Cell<u32>,
+    last_why: Cell<Option<Why>>,
 }
 
 impl Term {
@@ -94,8 +105,19 @@ pub fn cli_class(name: &str) -> &'static str {
 /// Panel-level events for the window (rail badges, notifications).
 pub enum Event {
     Changed,
-    /// A terminal needs attention: (process name).
-    Finished(String),
+    /// A terminal needs attention: (process name, why).
+    Attention(String, Why),
+}
+
+/// What stopped a terminal the user isn't looking at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Why {
+    /// The foreground program ended and the shell is back at its prompt.
+    Exited,
+    /// The program rang the bell: it wants input (a permission prompt, a safeguard, a question).
+    Bell,
+    /// It worked for a while, then output stopped: finished its turn, or is waiting on you.
+    Stopped,
 }
 
 pub struct TerminalPanel {
@@ -275,7 +297,11 @@ impl TerminalPanel {
             state: Cell::new(State::Idle),
             last_output: Cell::new(Instant::now()),
             busy_since: Cell::new(None),
+            last_input: Cell::new(None),
             timer_armed: Cell::new(false),
+            alerted: Cell::new(false),
+            alerts: Cell::new(0),
+            last_why: Cell::new(None),
         });
         self.terms.borrow_mut().push(t.clone());
 
@@ -308,11 +334,19 @@ impl TerminalPanel {
                 p.on_output(&t);
             }
         });
+        // Keys and pastes the user sends (not focus or mouse reports): work restarts after them.
+        let wt = Rc::downgrade(&t);
+        term.connect_commit(move |_, _, _| {
+            if let Some(t) = wt.upgrade() {
+                t.last_input.set(Some(Instant::now()));
+                t.busy_since.set(None);
+            }
+        });
         let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(&t));
         term.connect_bell(move |_| {
             if let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) {
                 if !p.is_seen(&t) {
-                    p.set_state(&t, State::Attention);
+                    p.alert(&t, Why::Bell, t.label());
                 }
             }
         });
@@ -403,9 +437,13 @@ impl TerminalPanel {
             t.timer_armed.set(false);
             let busy = t.busy_since.take().map_or(Duration::ZERO, |b| t.last_output.get() - b);
             p.update_job(&t);
-            let next = if busy >= SUSTAINED && !p.is_seen(&t) { State::Attention } else { State::Idle };
+            let unseen = !p.is_seen(&t);
             if t.state.get() != State::Attention {
-                p.set_state(&t, next);
+                if unseen && (busy >= SUSTAINED || t.alerted.get()) {
+                    p.alert(&t, Why::Stopped, t.label());
+                } else {
+                    p.set_state(&t, State::Idle);
+                }
             }
         });
     }
@@ -419,8 +457,10 @@ impl TerminalPanel {
         }
         let ended_long_job = job.is_none()
             && t.job_since.get().is_some_and(|s| s.elapsed() >= SUSTAINED)
+            && !t.last_input.get().is_some_and(|i| i.elapsed() < USER_DRIVEN)
             && !self.is_seen(t);
         t.job_since.set(job.as_ref().map(|_| Instant::now()));
+        let ended = t.label();
         *t.job.borrow_mut() = job;
         t.name.set_text(&t.label());
         for c in CLI_CLASSES {
@@ -428,12 +468,13 @@ impl TerminalPanel {
         }
         t.chip.add_css_class(cli_class(&t.label()));
         if ended_long_job {
-            self.set_state(t, State::Attention);
+            self.alert(t, Why::Exited, ended);
         }
         self.emit(Event::Changed);
     }
 
-    fn set_state(&self, t: &Rc<Term>, state: State) {
+    /// Show `state` on the terminal's chip; returns the state it replaced.
+    fn apply_state(&self, t: &Rc<Term>, state: State) -> State {
         let prev = t.state.replace(state);
         for c in ["running", "attention"] {
             t.chip.remove_css_class(c);
@@ -447,10 +488,27 @@ impl TerminalPanel {
             State::Idle => "",
             _ => codicon::CIRCLE_FILLED,
         });
-        if state == State::Attention && prev != State::Attention {
-            self.emit(Event::Finished(t.label()));
-        } else if state != prev {
+        prev
+    }
+
+    fn set_state(&self, t: &Rc<Term>, state: State) {
+        if self.apply_state(t, state) != state {
             self.emit(Event::Changed);
+        }
+    }
+
+    /// The terminal stopped while unseen: light its dot, and tell the user once. Until they
+    /// look at it, output that arrives and settles again lights the dot but isn't a new alert.
+    fn alert(&self, t: &Rc<Term>, why: Why, name: String) {
+        if self.apply_state(t, State::Attention) == State::Attention {
+            return;
+        }
+        if t.alerted.replace(true) {
+            self.emit(Event::Changed);
+        } else {
+            t.alerts.set(t.alerts.get() + 1);
+            t.last_why.set(Some(why));
+            self.emit(Event::Attention(name, why));
         }
     }
 
@@ -468,8 +526,11 @@ impl TerminalPanel {
     fn clear_seen(&self) {
         let active = self.terms.borrow().get(self.active.get()).cloned();
         if let Some(t) = active {
-            if self.is_seen(&t) && t.state.get() == State::Attention {
-                self.set_state(&t, State::Idle);
+            if self.is_seen(&t) {
+                t.alerted.set(false);
+                if t.state.get() == State::Attention {
+                    self.set_state(&t, State::Idle);
+                }
             }
         }
     }
@@ -554,12 +615,19 @@ impl TerminalPanel {
         }
     }
 
-    /// Self-test hooks: `select`, `clear`, `copy` (prints the clipboard), `menu <png> [hovered row]` (prints the items).
+    /// Self-test hooks: `away`, `back`, `state`, `select`, `clear`, `copy` (prints the clipboard), `menu <png> [hovered row]` (prints the items).
     pub fn selftest(&self, cmd: &str) {
         let Some(t) = self.terms.borrow().get(self.active.get()).cloned() else { return };
         let (cmd, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
         match cmd {
             "select" => t.term.select_all(),
+            // `away`/`back`: as if the window lost/regained focus. `state`: each terminal's status.
+            "away" => self.set_visible(false),
+            "back" => self.set_visible(true),
+            "state" => {
+                let states: Vec<String> = self.terms.borrow().iter().map(|t| format!("{}={:?} alerts={} why={:?}", t.label(), t.state.get(), t.alerts.get(), t.last_why.get())).collect();
+                eprintln!("selftest: terminals {}", states.join(" "));
+            }
             "clear" => clear(&t.term),
             "copy" => {
                 copy(&t.term);
