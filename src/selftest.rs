@@ -6,7 +6,7 @@
 //!
 //! Commands: `term TEXT` (typed into the shown terminal + Enter), `wait MS`, `key SPEC` (e.g. ctrl+shift+grave), `type TEXT` (quick pick or
 //! find box), `enter`, `down`, `escape`, `find TEXT`, `project N`, `theme ID`,
-//! `exec SHELL…`, `shot FILE`, `mem`, `close`, `answer yes|no`, `hover N`, `tree expand|collapse REL | rows | flap REL N`,
+//! `exec SHELL…`, `shot FILE`, `mem`, `close`, `answer yes|no`, `hover N`, `tree expand|collapse REL | rows | flap REL N` (`mtree` = the Claude Memory tree),
 //! `pmenu N [close]`, `open PATH`, `file edit LINE TEXT | save [force] | ctrls | autosave | focus | undo | state | close` (the open file), `quit`.
 
 use std::rc::Rc;
@@ -75,6 +75,13 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
         "tree" => {
             if let Some(t) = app.active_project().and_then(|p| p.tree().cloned()) {
                 t.selftest(arg);
+            }
+        }
+        "mtree" => {
+            if let Some(t) = app.active_project().and_then(|p| p.memory_tree().cloned()) {
+                t.selftest(arg);
+            } else {
+                eprintln!("selftest: no memory tree");
             }
         }
         "tick" => {

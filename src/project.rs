@@ -35,6 +35,7 @@ pub struct Project {
     indexing: Cell<bool>,
     recent: RefCell<Vec<PathBuf>>,
     tree: OnceCell<Rc<Tree>>,
+    memory: OnceCell<Rc<Tree>>,
     pub search: OnceCell<Rc<SearchView>>,
     pub git: RefCell<Rc<git::Status>>,
     git_timer: Cell<bool>,
@@ -81,6 +82,7 @@ impl Project {
             indexing: Cell::new(false),
             recent: RefCell::new(Vec::new()),
             tree: OnceCell::new(),
+            memory: OnceCell::new(),
             search: OnceCell::new(),
             git: RefCell::new(Rc::new(git::Status::default())),
             git_timer: Cell::new(false),
@@ -122,6 +124,9 @@ impl Project {
         );
         tree_page.append(&tree.widget);
         let _ = project.tree.set(tree);
+        if let Some(dir) = memory_dir(root) {
+            tree_page.append(&project.memory_section(&dir, scale));
+        }
         let (w1, w2, w3, w4) =
             (Rc::downgrade(&project), Rc::downgrade(&project), Rc::downgrade(&project), Rc::downgrade(&project));
         let search = SearchView::new(
@@ -163,6 +168,52 @@ impl Project {
 
     pub fn tree(&self) -> Option<&Rc<Tree>> {
         self.tree.get()
+    }
+
+    pub fn memory_tree(&self) -> Option<&Rc<Tree>> {
+        self.memory.get()
+    }
+
+    /// A collapsible "Claude Memory" section: Claude Code's notes for this project live in a
+    /// dot-folder outside it, so the project tree can't show them.
+    fn memory_section(self: &Rc<Self>, dir: &Path, scale: f64) -> gtk::Box {
+        self.editor.set_alias_root(dir);
+        let weak = Rc::downgrade(self);
+        let tree = Tree::new(
+            dir,
+            Rc::new(move |path, pin| {
+                if let Some(p) = weak.upgrade() {
+                    p.open_file(&path, pin);
+                }
+            }),
+            Rc::new(|| {}),
+        );
+        // Sized to its rows (the project tree takes the rest of the sidebar), then scrolls.
+        tree.widget.set_vexpand(false);
+        tree.widget.set_propagate_natural_height(true);
+        tree.widget.set_max_content_height((220.0 * scale) as i32);
+
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        header.add_css_class("section");
+        header.set_tooltip_text(Some(&dir.to_string_lossy()));
+        let chevron = gtk::Label::new(Some(codicon::CHEVRON_DOWN));
+        chevron.add_css_class("codicon");
+        header.append(&chevron);
+        header.append(&gtk::Label::new(Some("Claude Memory")));
+        let click = gtk::GestureClick::new();
+        let (body, chev) = (tree.widget.clone(), chevron.clone());
+        click.connect_released(move |_, _, _, _| {
+            let open = !body.is_visible();
+            body.set_visible(open);
+            chev.set_text(if open { codicon::CHEVRON_DOWN } else { codicon::CHEVRON_RIGHT });
+        });
+        header.add_controller(click);
+
+        let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        section.append(&header);
+        section.append(&tree.widget);
+        let _ = self.memory.set(tree);
+        section
     }
 
     pub fn set_on_git(&self, f: Rc<dyn Fn()>) {
@@ -284,6 +335,24 @@ impl Project {
     pub fn running_jobs(&self) -> Vec<String> {
         self.terminals.running_jobs()
     }
+}
+
+/// Claude Code's per-project name: the path with every non-alphanumeric character as `-`.
+fn claude_project_name(path: &Path) -> String {
+    path.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// Where Claude Code keeps its notes for the project at `root`, if there are any.
+pub fn memory_dir(root: &Path) -> Option<PathBuf> {
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
+        .map_or_else(|| glib::home_dir().join(".claude"), PathBuf::from);
+    let canonical = root.canonicalize().ok();
+    [Some(root), canonical.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(|p| config.join("projects").join(claude_project_name(p)).join("memory"))
+        .find(|d| d.is_dir())
 }
 
 /// Project files relative to `root`. Uses git when possible (fast, respects .gitignore);
@@ -466,6 +535,12 @@ impl Provider for FileProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_projects_like_claude_code() {
+        assert_eq!(claude_project_name(Path::new("/home/me/Projects/vibey")), "-home-me-Projects-vibey");
+        assert_eq!(claude_project_name(Path::new("/home/a.b/my_app")), "-home-a-b-my-app");
+    }
 
     #[test]
     fn indexes_this_repo() {

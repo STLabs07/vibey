@@ -38,6 +38,8 @@ pub struct Status {
 pub struct EditorGroup {
     pub widget: gtk::Box,
     root: PathBuf,
+    /// Files outside `root` under here show in the breadcrumb relative to this.
+    alias_root: RefCell<Option<PathBuf>>,
     style: SharedStyle,
     strip: gtk::Box,
     tabs_bar: gtk::Box,
@@ -122,6 +124,7 @@ impl EditorGroup {
         let group = Rc::new(EditorGroup {
             widget,
             root: root.to_path_buf(),
+            alias_root: RefCell::new(None),
             style,
             strip,
             tabs_bar,
@@ -293,6 +296,11 @@ impl EditorGroup {
     }
 
     /// Open (or focus) `path`. `pin = false` opens a preview tab.
+    /// Show files under `dir` as "dir-name › file" in the breadcrumb, not as an absolute path.
+    pub fn set_alias_root(&self, dir: &Path) {
+        *self.alias_root.borrow_mut() = dir.parent().map(Path::to_path_buf);
+    }
+
     pub fn open(&self, path: &Path, pin: bool) {
         let existing = self.tabs.borrow().iter().position(|t| t.view.path() == path);
         if let Some(i) = existing {
@@ -597,7 +605,12 @@ impl EditorGroup {
         self.breadcrumb.set_visible(true);
         self.tabs_bar.set_visible(true);
         let path = tab.view.path();
-        let rel = path.strip_prefix(&self.root).unwrap_or(&path);
+        let alias = self.alias_root.borrow();
+        let rel = path
+            .strip_prefix(&self.root)
+            .ok()
+            .or_else(|| alias.as_deref().and_then(|a| path.strip_prefix(a).ok()))
+            .unwrap_or(&path);
         let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
         for (i, p) in parts.iter().enumerate() {
             if i + 1 == parts.len() {
