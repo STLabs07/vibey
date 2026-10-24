@@ -1,10 +1,27 @@
 # Vibey
 
-A lightweight, VS Code-shaped window for people who code through terminal AI CLIs (Claude
-Code and similar). The AI edits the files. Vibey shows your projects the way VS Code does, with
-VS Code's own themes, icons and syntax colors, and hosts the terminals, at about a seventh of the
-memory. When the AI asks you to put something in a file (an API key on the line below, a value in
-`.env`), click in the file, type or paste, and press Ctrl+S.
+**A lightweight, VS Code-shaped window for coding through terminal AI CLIs** (Claude Code,
+Codex, Gemini, aider, and the like).
+
+If the AI does the editing and you spend your day in a terminal, you mostly need VS Code for
+the way it lays a project out, not for its editor. Vibey keeps that part: your projects, files,
+tabs, git status and terminals in one window, with VS Code's own themes, icons and syntax
+colors, at about a seventh of the memory.
+
+- **Several projects, one window.** Each project has its own file tree, tabs and terminals. A
+  rail icon per project pulses while a terminal is working and shows a dot when one finished
+  while you were looking elsewhere.
+- **Terminals that tell you when they're done.** A notification when a job finishes, when the
+  CLI rings the bell asking for you, or when it stops after sustained work (done, or blocked on
+  a prompt or safeguard). One per terminal until you look at it, so nothing spams.
+- **VS Code's look.** Its themes (6 built-in, 60+ community, or drop in your own JSON), Seti
+  file icons, TextMate-grammar syntax colors, git decorations.
+- **Fast to get around.** Ctrl+P file finder, find in file, project-wide search.
+- **Plain-text editing for the moments you need it.** When the AI asks you to paste an API key
+  into `.env`, click in the file, type or paste, and press Ctrl+S. No more editor than that.
+- **Claude's memory, visible.** The notes Claude Code keeps for a project live in a hidden
+  folder outside it; Vibey shows them in a Claude Memory section of the Explorer.
+- **Resource panel.** CPU and memory per project, terminal and process, with kill.
 
 Linux only. Rust + GTK4 + VTE. MIT licensed. See [SPEC.md](SPEC.md) for scope and
 [PLAN.md](PLAN.md) for architecture and measurements.
@@ -60,7 +77,7 @@ folders are restored on the next start.
 | Ctrl+` / Ctrl+Shift+` | Toggle focus editor ↔ terminal / new terminal |
 | Ctrl+K Ctrl+T | Color theme picker (live preview, Escape reverts) |
 | Ctrl+Shift+R | Resource panel: CPU / memory per project → terminal → process, with kill |
-| Ctrl+Shift+C / Ctrl+Shift+V | Copy / paste in a terminal. Ctrl+C also copies while text is selected (otherwise it interrupts as usual). Right-click: Copy, Paste, Select All, Clear |
+| Ctrl+Shift+C / Ctrl+Shift+V | Copy / paste in a terminal. Ctrl+C also copies while text is selected (otherwise it interrupts as usual). Right-click: Copy, Paste, Select All, Clear. A copy shows a brief "Copied to clipboard" note |
 
 Focus in a terminal: only Ctrl+P, Ctrl+F, Ctrl+1…9, Alt+1…9 and Ctrl+` are taken. Every other key (Ctrl+W,
 Ctrl+F, Ctrl+K, …) goes to the shell or CLI.
@@ -71,7 +88,9 @@ The top right of the title bar shows **Resources used**: RAM and CPU for Vibey p
 running in all projects' terminals. CPU is a share of the whole machine (all cores = 100%). A project's rail avatar shows a pulsing
 ring while one of its terminals is working, and a blue dot when one finished while you were
 looking elsewhere, e.g. "Claude finished in project B" while you're in project A. When Vibey
-isn't focused, you also get a desktop notification.
+isn't focused, you also get a desktop notification, once per terminal until you look at it:
+"finished" (a long job ended), "needs you" (the CLI rang the bell), or "stopped" (output
+ended after sustained work: finished, or waiting on you or a safeguard).
 
 Git status shows the way VS Code shows it: colored tree entries with M/U/A letters, gutter
 bars against the staged version, `main*` and ↓/↑ in the status bar, and a dirty dot on the
@@ -88,9 +107,15 @@ in `~/.config/vibey/config.toml`.
 Click in the tree opens a preview tab (italic, replaced by the next click). Double-click pins it.
 When a file changes on disk, its tab updates in place and the changed lines flash, then fade.
 
-Vibey never edits your files, with one exception: in a Markdown file, click a task box
-(`- [ ]`) to tick it off (`- [x]`), and click again to untick. Handy when the AI writes a task
-list and asks you to mark things done.
+Vibey only changes a file when you type in it and save, or in one other case: in a Markdown
+file, click a task box (`- [ ]`) to tick it off (`- [x]`), and click again to untick. Handy when
+the AI writes a task list and asks you to mark things done.
+
+**Claude Memory.** Claude Code keeps per-project notes in
+`~/.claude/projects/<project>/memory/` (or under `$CLAUDE_CONFIG_DIR`), a hidden folder outside
+the project. When it exists, the Explorer shows it as a collapsible Claude Memory section under
+the project tree. Click a file to read it, or to fix something the AI remembered wrong. It
+appears when the project is opened, so reopen the project if Claude creates the folder later.
 
 ## Configure
 

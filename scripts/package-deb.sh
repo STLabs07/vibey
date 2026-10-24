@@ -23,10 +23,11 @@ Installed-Size: $SIZE
 Depends: libgtk-4-1 (>= 4.14), libvte-2.91-gtk4-0 (>= 0.76), git
 Section: devel
 Priority: optional
-Description: Read-only, VS Code-shaped window for terminal AI CLIs
+Description: Lightweight, VS Code-shaped window for terminal AI CLIs
  Shows projects the way VS Code does (themes, icons, syntax colors, git
  decorations) and hosts terminals with "finished" notifications, using a
- fraction of VS Code's memory. It is not an editor: the AI edits the files.
+ fraction of VS Code's memory. The AI edits the files; Vibey adds plain
+ typing and saving for keys and config values, nothing more.
 CONTROL
 dpkg-deb --build --root-owner-group "$ROOT" "target/vibey_${VERSION}_amd64.deb" >/dev/null
 echo "Built target/vibey_${VERSION}_amd64.deb"

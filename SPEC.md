@@ -33,6 +33,15 @@ Changes from the brief are marked **[rev]**.
   turns warning-colored); a reload never replaces unsaved edits; files that aren't valid UTF-8 or contain
   NUL stay read-only so they can't be corrupted; CRLF files stay CRLF. Still out: everything else an
   editor does (see Hard scope).
+- 2026-10-23, **terminal alerts**: one alert per terminal until it's seen, saying what happened
+  (finished / needs you / stopped). Output going quiet alone no longer alerts; it does after
+  sustained work, which catches a CLI stopped by a safeguard or waiting on input.
+- 2026-10-23, **"Copied to clipboard" toast**: a small, click-through note over the window after a
+  terminal copy (`toast.rs`, reusable for other short messages).
+- 2026-10-23, **Claude Memory section in the Explorer**: Claude Code's per-project notes
+  (`~/.claude/projects/<project>/memory/`, or under `CLAUDE_CONFIG_DIR`) live in a hidden folder
+  outside the project, so the tree couldn't show them. They appear as a second, collapsible tree
+  under the project tree when the folder exists at project open. Same plain-text editing rules as any file.
 
 ## What this is
 A very lightweight, Linux-only "VS Code-shaped" window for people who code entirely through terminal
@@ -47,7 +56,7 @@ fraction of the weight, with better multi-project / multi-terminal awareness.
 IN: file tree, syntax-highlighted code view with tabs, plain-text editing and saving (type, paste,
 undo, Ctrl+S; see the 2026-10-15 log entry), embedded terminals, multiple projects in one window,
 live file reload, git status display, resource monitoring, `vibey .` launcher, file finder (Ctrl+P),
-find in file (Ctrl+F), theme picker.
+find in file (Ctrl+F), theme picker, Claude Memory section.
 
 OUT, permanently: extensions/plugins, debugger, LSP, IntelliSense, autocomplete, search-and-replace,
 formatters, multi-cursor and other editor features. Editing stays a small utility.

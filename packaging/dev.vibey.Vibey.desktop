@@ -2,7 +2,7 @@
 Type=Application
 Name=Vibey
 GenericName=Project Viewer
-Comment=Read-only, VS Code-shaped window for coding with terminal AI CLIs
+Comment=Lightweight, VS Code-shaped window for coding with terminal AI CLIs
 Exec=vibey %F
 Icon=dev.vibey.Vibey
 Terminal=false
