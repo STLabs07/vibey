@@ -19,6 +19,7 @@ mod selftest;
 mod session;
 mod terminal;
 mod theme;
+mod toast;
 mod tree;
 
 use std::cell::{Cell, RefCell};

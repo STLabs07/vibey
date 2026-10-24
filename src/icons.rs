@@ -18,6 +18,7 @@ const CODICON_FONT: &[u8] = include_bytes!("../assets/icons/codicon.ttf");
 pub mod codicon {
     pub const CHEVRON_RIGHT: &str = "\u{eab6}";
     pub const CHEVRON_DOWN: &str = "\u{eab4}";
+    pub const CHECK: &str = "\u{eab2}";
     pub const CLOSE: &str = "\u{ea76}";
     pub const GIT_BRANCH: &str = "\u{ea68}";
     pub const ARROW_UP: &str = "\u{eaa1}";

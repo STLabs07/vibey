@@ -439,6 +439,21 @@ popover separator { margin: {{4}} 0; background-color: @vs_editorWidget_border; 
 .watermark .what { margin-right: {{10}}; padding: {{4}} 0; }
 .watermark .keys { padding: {{4}} 0; opacity: 0.9; }
 
+/* ---- toast (see toast.rs) ---- */
+.toast {
+  margin-bottom: {{40}};
+  padding: {{6}} {{14}};
+  background-color: @vs_editorWidget_background;
+  color: @vs_foreground;
+  border: 1px solid @vs_editorWidget_border;
+  border-radius: {{6}};
+  box-shadow: 0 {{2}} {{12}} 0 @vs_widget_shadow;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.toast.shown { opacity: 1; }
+.toast label.codicon { color: @vs_list_highlightForeground; }
+
 /* ---- confirmation dialog (in-window; see dialog.rs) ---- */
 .dialog-scrim { background-color: alpha(#000000, 0.35); }
 .dialog-card {

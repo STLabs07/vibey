@@ -245,6 +245,7 @@ impl App {
         overlay.add_overlay(&quick.widget);
         let confirm = crate::dialog::Confirm::new(scale, &outer);
         overlay.add_overlay(&confirm.widget);
+        crate::toast::install(&overlay);
         window.set_child(Some(&overlay));
         // Right-click menus: created once, parented to the window content, never unparented.
         let project_menu = ContextMenu::new(&outer, &[("Close Project", "", false)]);

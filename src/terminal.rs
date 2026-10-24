@@ -747,6 +747,7 @@ fn copy(term: &vte4::Terminal) {
     if term.has_selection() {
         term.copy_clipboard_format(vte4::Format::Text);
         term.unselect_all();
+        crate::toast::show("Copied to clipboard");
     }
 }
 
