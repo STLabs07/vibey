@@ -1,4 +1,4 @@
 target/
 
-# Built packages served by the site (rebuild with scripts/package-deb.sh)
+# Local builds of the .deb (published as GitHub release assets, not in the site)
 webapp/downloads/
