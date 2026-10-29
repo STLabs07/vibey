@@ -629,6 +629,13 @@ impl TerminalPanel {
                 eprintln!("selftest: terminals {}", states.join(" "));
             }
             "clear" => clear(&t.term),
+            // `primary`: what highlighting left in the primary selection (should be nothing).
+            "primary" => {
+                let has = t.term.has_selection();
+                t.term.primary_clipboard().read_text_async(None::<&gio::Cancellable>, move |r| {
+                    eprintln!("selftest: primary={:?} selected={has}", r.ok().flatten().map(|s| s.trim().to_string()));
+                });
+            }
             "copy" => {
                 copy(&t.term);
                 t.term.clipboard().read_text_async(None::<&gio::Cancellable>, |r| {
@@ -740,6 +747,28 @@ fn install_clipboard(t: &Rc<Term>) {
         context_menu(&t, x, y);
     });
     t.term.add_controller(click);
+
+    // No X11-style copy-on-highlight or middle-click paste: the clipboard only changes on an
+    // explicit copy. VTE claims the primary selection whenever text is highlighted, so drop
+    // its claim as soon as it lands, and swallow middle clicks.
+    let middle = gtk::GestureClick::new();
+    middle.set_button(gtk::gdk::BUTTON_MIDDLE);
+    middle.set_propagation_phase(gtk::PropagationPhase::Capture);
+    middle.connect_pressed(|g, _, _, _| {
+        g.set_state(gtk::EventSequenceState::Claimed);
+    });
+    t.term.add_controller(middle);
+    thread_local! {
+        static PRIMARY_WATCHED: Cell<bool> = const { Cell::new(false) };
+    }
+    if !PRIMARY_WATCHED.with(|w| w.replace(true)) {
+        t.term.primary_clipboard().connect_changed(|cb| {
+            let from_vte = cb.content().is_some_and(|c| c.type_().name() == "VteContentProvider");
+            if cb.is_local() && from_vte {
+                let _ = cb.set_content(None::<&gtk::gdk::ContentProvider>);
+            }
+        });
+    }
 }
 
 /// Copy the selection as plain text and drop it, so the next Ctrl+C interrupts again.
