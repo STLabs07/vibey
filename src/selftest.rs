@@ -6,7 +6,7 @@
 //!
 //! Commands: `term TEXT` (typed into the shown terminal + Enter), `wait MS`, `key SPEC` (e.g. ctrl+shift+grave), `type TEXT` (quick pick or
 //! find box), `enter`, `down`, `escape`, `find TEXT`, `project N`, `theme ID`,
-//! `exec SHELL…`, `shot FILE`, `mem`, `close`, `answer yes|no`, `hover N`, `tree expand|collapse REL | rows | flap REL N` (`mtree` = the Claude Memory tree),
+//! `exec SHELL…`, `shot FILE [SCALE]`, `size W H`, `mem`, `close`, `answer yes|no`, `hover N`, `tree expand|collapse REL | rows | flap REL N` (`mtree` = the Claude Memory tree),
 //! `pmenu N [close]`, `open PATH`, `file edit LINE TEXT | save [force] | ctrls | autosave | focus | undo | state | close` (the open file), `quit`.
 
 use std::rc::Rc;
@@ -62,6 +62,14 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
             }
         }
         "resources" => app.toggle_resources(),
+        // `size W H`: resize the window (for screenshots); reports the monitor it's on.
+        "size" => {
+            let (w, h) = arg.split_once(' ').unwrap_or((arg, ""));
+            app.window.unmaximize();
+            app.window.set_default_size(w.parse().unwrap_or(1400), h.parse().unwrap_or(900));
+            let mon = WidgetExt::display(&app.window).monitors().item(0).and_downcast::<gdk::Monitor>();
+            eprintln!("selftest: size monitor={:?} maximized={}", mon.map(|m| m.geometry()), app.window.is_maximized());
+        }
         "term" => {
             if let Some(p) = app.active_project() {
                 p.terminals.feed(&format!("{arg}\n"));
@@ -128,9 +136,10 @@ fn step(app: Rc<App>, gapp: gtk::Application, steps: Vec<String>, i: usize) {
         }
         "shot" => {
             // The first frames may not have been drawn yet; retry briefly.
-            let (window, path) = (app.window.clone(), arg.to_string());
+            let (path, scale) = arg.split_once(' ').map_or((arg, 1.0), |(p, s)| (p, s.parse().unwrap_or(1.0)));
+            let (window, path) = (app.window.clone(), path.to_string());
             let tries = std::cell::Cell::new(0);
-            glib::timeout_add_local(Duration::from_millis(100), move || match shot(&window, &path) {
+            glib::timeout_add_local(Duration::from_millis(100), move || match shot(&window, &path, scale) {
                 Ok(()) => {
                     eprintln!("selftest: saved {path}");
                     glib::ControlFlow::Break
@@ -198,14 +207,16 @@ fn parse_key(spec: &str) -> (gdk::Key, gdk::ModifierType) {
     (key, mods)
 }
 
-/// Render the window (title bar + content) with a software renderer and save it as PNG.
-fn shot(window: &gtk::ApplicationWindow, path: &str) -> Result<(), String> {
+/// Render the window (title bar + content) with a software renderer and save it as PNG,
+/// `scale` times its size (2 for crisp high-DPI images).
+fn shot(window: &gtk::ApplicationWindow, path: &str, scale: f32) -> Result<(), String> {
     // A toplevel can't be painted by WidgetPaintable; its title bar and child can.
     let child = window.child().ok_or("window has no child")?;
     let bar = window.titlebar();
     let (w, ch) = (child.width(), child.height());
     let th = bar.as_ref().map_or(0, |b| b.height());
     let snapshot = gtk::Snapshot::new();
+    snapshot.scale(scale, scale);
     if let Some(bar) = &bar {
         gtk::WidgetPaintable::new(Some(bar)).snapshot(&snapshot, w as f64, th as f64);
     }
@@ -216,7 +227,7 @@ fn shot(window: &gtk::ApplicationWindow, path: &str) -> Result<(), String> {
         .ok_or_else(|| format!("nothing rendered (mapped={}, {w}x{ch})", window.is_mapped()))?;
     let renderer = gsk::CairoRenderer::new();
     renderer.realize_for_display(&WidgetExt::display(window)).map_err(|e| e.to_string())?;
-    let texture = renderer.render_texture(&node, Some(&gtk::graphene::Rect::new(0.0, 0.0, w as f32, (th + ch) as f32)));
+    let texture = renderer.render_texture(&node, Some(&gtk::graphene::Rect::new(0.0, 0.0, w as f32 * scale, (th + ch) as f32 * scale)));
     renderer.unrealize();
     texture.save_to_png(path).map_err(|e| e.to_string())
 }

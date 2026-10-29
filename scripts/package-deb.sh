@@ -3,6 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 command -v cargo >/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
+# Keep the builder's home and checkout paths (in panic messages) out of the published binary.
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$PWD=/vibey --remap-path-prefix=$HOME=/home"
 cargo build --release
 VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 ROOT=target/deb/vibey_${VERSION}_amd64

@@ -1,1 +1,4 @@
 target/
+
+# Built packages served by the site (rebuild with scripts/package-deb.sh)
+webapp/downloads/
