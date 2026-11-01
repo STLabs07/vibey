@@ -686,7 +686,7 @@ impl App {
                 let (verb, body) = match why {
                     Why::Exited => ("finished", "Back at the prompt."),
                     Why::Bell => ("needs you", "It's waiting for your input."),
-                    Why::Stopped => ("stopped", "Finished, or waiting on you."),
+                    Why::Stopped => ("is waiting", "It finished its turn, or needs your input."),
                 };
                 let n = gio::Notification::new(&format!("{job} {verb} in {}", project.name));
                 n.set_body(Some(body));

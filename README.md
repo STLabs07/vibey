@@ -77,7 +77,7 @@ folders are restored on the next start.
 | Ctrl+` / Ctrl+Shift+` | Toggle focus editor ↔ terminal / new terminal |
 | Ctrl+K Ctrl+T | Color theme picker (live preview, Escape reverts) |
 | Ctrl+Shift+R | Resource panel: CPU / memory per project → terminal → process, with kill |
-| Ctrl+Shift+C / Ctrl+Shift+V | Copy / paste in a terminal. Ctrl+C also copies while text is selected (otherwise it interrupts as usual). Right-click: Copy, Paste, Select All, Clear. A copy shows a brief "Copied to clipboard" note |
+| Ctrl+Shift+C / Ctrl+Shift+V | Copy / paste in a terminal. Ctrl+C also copies while text is selected (otherwise it interrupts as usual). Ctrl+V pastes text too, except in editors, pagers and multiplexers (vim, nano, less, tmux, ssh…), which keep the key; with no text on the clipboard it goes through to the CLI, which is how image paste works (that needs `xclip`, or `wl-clipboard` on Wayland). Right-click: Copy, Paste, Select All, Clear. A copy shows a brief "Copied to clipboard" note |
 
 Focus in a terminal: only Ctrl+P, Ctrl+F, Ctrl+1…9, Alt+1…9 and Ctrl+` are taken. Every other key (Ctrl+W,
 Ctrl+F, Ctrl+K, …) goes to the shell or CLI.
@@ -89,8 +89,10 @@ running in all projects' terminals. CPU is a share of the whole machine (all cor
 ring while one of its terminals is working, and a blue dot when one finished while you were
 looking elsewhere, e.g. "Claude finished in project B" while you're in project A. When Vibey
 isn't focused, you also get a desktop notification, once per terminal until you look at it:
-"finished" (a long job ended), "needs you" (the CLI rang the bell), or "stopped" (output
-ended after sustained work: finished, or waiting on you or a safeguard).
+"finished" (a long job ended), "needs you" (the CLI rang the bell or its title asks for input),
+or "is waiting" (an AI CLI stopped working: its turn ended or it's at a prompt). Pauses in the
+middle of a turn don't alert: Claude Code and Gemini CLI report their status in the terminal
+title, and other AI CLIs have to be silent for 15 seconds.
 
 Git status shows the way VS Code shows it: colored tree entries with M/U/A letters, gutter
 bars against the staged version, `main*` and ↓/↑ in the status bar, and a dirty dot on the

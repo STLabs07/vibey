@@ -2,12 +2,15 @@
 //! foreground process and a status per terminal.
 //!
 //! Status is event-driven (no polling): VTE's `contents-changed` marks a terminal busy and
-//! arms one quiet-timer; when output stops for `QUIET`, it's idle again. A busy stretch of at
-//! least `SUSTAINED` (an AI CLI working, a long build) that ends while the user isn't
-//! looking at that terminal leaves it "finished, unseen". So does a bell, or a long-running
-//! foreground job exiting. Output the user caused (typing echo, a TUI redrawing as they type)
-//! isn't work: a busy stretch only counts from the last input, so typing for a while and then
-//! alt-tabbing away doesn't look like something finished.
+//! arms one quiet-timer; when output stops for `QUIET`, it's idle again.
+//!
+//! Output going quiet doesn't mean a program is done: an AI CLI goes silent mid-turn, and a dev
+//! server between requests. So a terminal the user isn't looking at only alerts on a real signal:
+//! a bell, a long-running foreground job exiting, or an AI CLI's title saying it stopped working
+//! (see `title_phase`). An AI CLI whose title says nothing gets the old guess, with a much longer
+//! silence: `AGENT_QUIET` after a busy stretch of at least `SUSTAINED`. Output the user caused
+//! (typing echo, a TUI redrawing as they type) isn't work: a busy stretch only counts from the
+//! last input, so typing for a while and then alt-tabbing away doesn't look like something finished.
 
 use std::cell::{Cell, RefCell};
 use std::os::fd::AsRawFd;
@@ -28,6 +31,10 @@ use crate::theme::ThemeModel;
 const QUIET: Duration = Duration::from_millis(1500);
 /// Busy for at least this long before going quiet → worth telling the user.
 const SUSTAINED: Duration = Duration::from_secs(3);
+/// An AI CLI that doesn't report its status in the title: silence this long means it stopped.
+const AGENT_QUIET: Duration = Duration::from_secs(15);
+/// A title that stopped saying "working" must hold for this long before anyone is told.
+const AGENT_SETTLE: Duration = Duration::from_secs(2);
 /// A job ending this soon after the user typed was ended by them (`q`, `/exit`, Ctrl+C).
 const USER_DRIVEN: Duration = Duration::from_secs(3);
 /// Re-read the foreground process at most this often while output streams.
@@ -39,6 +46,33 @@ pub enum State {
     Running,
     /// Stopped (exited, rang the bell, went quiet after real work) while the user was looking elsewhere.
     Attention,
+}
+
+/// What an AI CLI says it's doing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    Working,
+    /// Not working: its turn ended, or it's waiting at a prompt. Claude Code doesn't tell these apart.
+    Idle,
+    /// Explicitly asking the user for something.
+    Waiting,
+}
+
+/// Read an AI CLI's status from its terminal title, if the title carries one.
+fn title_phase(title: &str) -> Option<Phase> {
+    if title.starts_with("[ ! ] Action Required") || title.starts_with("[ . ] Action Required") {
+        return Some(Phase::Waiting); // Codex
+    }
+    match title.chars().next()? {
+        // Claude Code: `✳ name` when idle or at a permission prompt, a spinner frame while working.
+        '✳' => Some(Phase::Idle),
+        '◐' | '◓' | '◑' | '◒' | '\u{2800}'..='\u{28ff}' => Some(Phase::Working),
+        // Gemini CLI: `◇ Ready`, `✋ Action Required`, `✦ <thought>`, `⏲ Working…`.
+        '◇' => Some(Phase::Idle),
+        '✋' => Some(Phase::Waiting),
+        '✦' | '⏲' => Some(Phase::Working),
+        _ => None,
+    }
 }
 
 struct Term {
@@ -57,6 +91,10 @@ struct Term {
     busy_since: Cell<Option<Instant>>,
     last_input: Cell<Option<Instant>>,
     timer_armed: Cell<bool>,
+    /// The foreground program's status from its title, if it reports one.
+    phase: Cell<Option<Phase>>,
+    /// It reported working, and hasn't been seen to stop since.
+    working: Cell<bool>,
     /// Told the user about this terminal and they haven't looked at it since: output that
     /// arrives and settles again meanwhile must not raise another alert.
     alerted: Cell<bool>,
@@ -78,6 +116,11 @@ impl Term {
     }
 }
 
+/// Is this foreground program an AI CLI with no status in its title, so that silence is the only sign it stopped?
+fn guesses_from_silence(t: &Term) -> bool {
+    t.phase.get().is_none() && t.job.borrow().as_deref().is_some_and(|j| !matches!(cli_class(j), "cli-proc" | "cli-shell"))
+}
+
 const CLI_CLASSES: [&str; 6] = ["cli-claude", "cli-codex", "cli-gemini", "cli-ai", "cli-proc", "cli-shell"];
 
 /// Color class for a terminal by what runs in it: Claude orange, Codex green, Gemini blue,
@@ -90,7 +133,7 @@ pub fn cli_class(name: &str) -> &'static str {
         "cli-codex"
     } else if n.starts_with("gemini") {
         "cli-gemini"
-    } else if ["aider", "opencode", "cursor", "amp", "goose", "crush", "qwen", "copilot", "cline", "kilo", "droid", "llm", "ollama"]
+    } else if ["agy", "antigravity", "agent", "grok", "aider", "opencode", "cursor", "amp", "goose", "crush", "qwen", "copilot", "cline", "kilo", "droid", "llm", "ollama"]
         .iter()
         .any(|a| n.starts_with(a))
     {
@@ -114,9 +157,9 @@ pub enum Event {
 pub enum Why {
     /// The foreground program ended and the shell is back at its prompt.
     Exited,
-    /// The program rang the bell: it wants input (a permission prompt, a safeguard, a question).
+    /// The program rang the bell or its title asks for input (a permission prompt, a safeguard, a question).
     Bell,
-    /// It worked for a while, then output stopped: finished its turn, or is waiting on you.
+    /// An AI CLI stopped working: finished its turn, or is waiting on you.
     Stopped,
 }
 
@@ -299,6 +342,8 @@ impl TerminalPanel {
             busy_since: Cell::new(None),
             last_input: Cell::new(None),
             timer_armed: Cell::new(false),
+            phase: Cell::new(None),
+            working: Cell::new(false),
             alerted: Cell::new(false),
             alerts: Cell::new(0),
             last_why: Cell::new(None),
@@ -352,9 +397,10 @@ impl TerminalPanel {
         });
         let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(&t));
         term.connect_window_title_changed(move |term| {
-            if let (Some(_), Some(t)) = (me.upgrade(), wt.upgrade()) {
+            if let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) {
                 if let Some(title) = term.window_title() {
                     t.chip.set_tooltip_text(Some(&format!("{} · {title}", t.label())));
+                    p.on_title(&t, &title);
                 }
             }
         });
@@ -430,22 +476,64 @@ impl TerminalPanel {
         glib::timeout_add_local_once(after, move || {
             let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) else { return };
             let quiet_for = t.last_output.get().elapsed();
-            if quiet_for < QUIET {
-                p.arm_quiet_timer(&t, QUIET - quiet_for);
+            let needed = if guesses_from_silence(&t) { AGENT_QUIET } else { QUIET };
+            if quiet_for < needed {
+                p.arm_quiet_timer(&t, needed - quiet_for);
                 return;
             }
             t.timer_armed.set(false);
             let busy = t.busy_since.take().map_or(Duration::ZERO, |b| t.last_output.get() - b);
             p.update_job(&t);
+            // It says it's still working: a silent stretch mid-turn isn't the end of anything.
+            if t.phase.get() == Some(Phase::Working) {
+                return;
+            }
             let unseen = !p.is_seen(&t);
             if t.state.get() != State::Attention {
-                if unseen && (busy >= SUSTAINED || t.alerted.get()) {
+                let stopped = guesses_from_silence(&t) && busy >= SUSTAINED;
+                if unseen && (stopped || t.alerted.get()) {
                     p.alert(&t, Why::Stopped, t.label());
                 } else {
                     p.set_state(&t, State::Idle);
                 }
             }
         });
+    }
+
+    /// The title changed: an AI CLI reporting its status is the signal for "finished" and
+    /// "needs you". Only a foreground program counts; a shell prompt can title itself anything.
+    fn on_title(&self, t: &Rc<Term>, title: &str) {
+        let phase = t.foreground_pgid().and_then(|_| title_phase(title));
+        t.phase.set(phase);
+        match phase {
+            Some(Phase::Working) => {
+                t.working.set(true);
+                self.set_state(t, State::Running);
+            }
+            Some(Phase::Waiting) => {
+                t.working.set(false);
+                if self.is_seen(t) {
+                    self.set_state(t, State::Idle);
+                } else {
+                    self.alert(t, Why::Bell, t.label());
+                }
+            }
+            Some(Phase::Idle) if t.working.get() => {
+                let (me, wt) = (self.me.borrow().clone(), Rc::downgrade(t));
+                glib::timeout_add_local_once(AGENT_SETTLE, move || {
+                    let (Some(p), Some(t)) = (me.upgrade(), wt.upgrade()) else { return };
+                    if t.phase.get() != Some(Phase::Idle) || !t.working.replace(false) {
+                        return;
+                    }
+                    if p.is_seen(&t) {
+                        p.set_state(&t, State::Idle);
+                    } else {
+                        p.alert(&t, Why::Stopped, t.label());
+                    }
+                });
+            }
+            _ => {}
+        }
     }
 
     /// Refresh the foreground job (tab name); a long job ending unseen needs attention.
@@ -460,6 +548,10 @@ impl TerminalPanel {
             && !t.last_input.get().is_some_and(|i| i.elapsed() < USER_DRIVEN)
             && !self.is_seen(t);
         t.job_since.set(job.as_ref().map(|_| Instant::now()));
+        if job.is_none() {
+            t.phase.set(None);
+            t.working.set(false);
+        }
         let ended = t.label();
         *t.job.borrow_mut() = job;
         t.name.set_text(&t.label());
@@ -629,6 +721,18 @@ impl TerminalPanel {
                 eprintln!("selftest: terminals {}", states.join(" "));
             }
             "clear" => clear(&t.term),
+            // `send TEXT`: type TEXT and Enter (a real CR, which `term` isn't). `ctrlv`: what Ctrl+V
+            // does here. `screen [N]`: the terminal's last N lines of text, last first.
+            "send" => t.term.feed_child(format!("{arg}\r").as_bytes()),
+            "ctrlv" => {
+                let pasted = paste_on_ctrl_v(&t);
+                eprintln!("selftest: ctrl+v pasted={pasted} job={:?}", t.job.borrow());
+            }
+            "screen" => {
+                let text = t.term.text_format(vte4::Format::Text).unwrap_or_default();
+                let lines: Vec<&str> = text.lines().map(str::trim_end).filter(|l| !l.is_empty()).rev().take(arg.parse().unwrap_or(8)).collect();
+                eprintln!("selftest: screen {lines:?}");
+            }
             // `primary`: what highlighting left in the primary selection (should be nothing).
             "primary" => {
                 let has = t.term.has_selection();
@@ -714,22 +818,51 @@ impl TerminalPanel {
     }
 }
 
-/// Copy and paste like GNOME Terminal (Ctrl+Shift+C / Ctrl+Shift+V), Ctrl+C copies instead of
-/// interrupting while text is selected (like Windows Terminal), and a right-click menu.
+/// Programs with their own use for Ctrl+V (block select in vim, page down in nano), and ones that
+/// may be running such a program inside them.
+const KEEP_CTRL_V: [&str; 19] = [
+    "vi", "vim", "nvim", "view", "nano", "pico", "micro", "emacs", "hx", "helix", "kak", "joe", "mcedit", "less", "more", "most", "man", "tmux", "ssh",
+];
+
+/// Does this foreground job (`None`: a shell prompt) take Ctrl+V as paste? Everything does unless
+/// it's known to want the key, so a new AI CLI works without being listed anywhere.
+fn ctrl_v_pastes(job: Option<&str>) -> bool {
+    job.is_none_or(|j| !KEEP_CTRL_V.contains(&j))
+}
+
+/// Ctrl+V pastes text through GTK, like the right-click menu, instead of sending `^V` for the
+/// program to go and read the clipboard itself (`agy` needs xclip or wl-clipboard for that, and
+/// fails without them). No text on the clipboard: `^V` goes through, which is how a CLI pastes an image.
+fn paste_on_ctrl_v(t: &Term) -> bool {
+    if !ctrl_v_pastes(t.foreground_pgid().and_then(process_name).as_deref()) {
+        return false;
+    }
+    let formats = t.term.clipboard().formats();
+    let has_text = formats.contains_type(glib::Type::STRING) || formats.contain_mime_type("text/plain");
+    if has_text {
+        t.term.paste_clipboard();
+    }
+    has_text
+}
+
+/// Copy and paste like GNOME Terminal (Ctrl+Shift+C / Ctrl+Shift+V) plus plain Ctrl+V, Ctrl+C copies
+/// instead of interrupting while text is selected (like Windows Terminal), and a right-click menu.
 fn install_clipboard(t: &Rc<Term>) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let term = t.term.downgrade();
+    let wt = Rc::downgrade(t);
     keys.connect_key_pressed(move |_, key, _, mods| {
         use gtk::gdk::{Key, ModifierType as M};
-        let Some(term) = term.upgrade() else { return glib::Propagation::Proceed };
+        let Some(t) = wt.upgrade() else { return glib::Propagation::Proceed };
+        let term = &t.term;
         if !mods.contains(M::CONTROL_MASK) || mods.contains(M::ALT_MASK) {
             return glib::Propagation::Proceed;
         }
         let shift = mods.contains(M::SHIFT_MASK);
         match key.to_lower() {
-            Key::c if shift || term.has_selection() => copy(&term),
+            Key::c if shift || term.has_selection() => copy(term),
             Key::v if shift => term.paste_clipboard(),
+            Key::v if paste_on_ctrl_v(&t) => {}
             _ => return glib::Propagation::Proceed,
         }
         glib::Propagation::Stop
@@ -840,7 +973,42 @@ mod tests {
         assert_eq!(cli_class("codex"), "cli-codex");
         assert_eq!(cli_class("gemini"), "cli-gemini");
         assert_eq!(cli_class("aider"), "cli-ai");
+        assert_eq!(cli_class("agy"), "cli-ai");
+        assert_eq!(cli_class("grok-1.0.70-lin"), "cli-ai");
         assert_eq!(cli_class("bash"), "cli-shell");
         assert_eq!(cli_class("cargo"), "cli-proc");
+    }
+
+    #[test]
+    fn reads_status_from_titles() {
+        // Claude Code, as captured from 2.1.316: idle, spinner frames, and at a permission prompt.
+        assert_eq!(title_phase("✳ Claude Code"), Some(Phase::Idle));
+        assert_eq!(title_phase("◐ Claude Code"), Some(Phase::Working));
+        assert_eq!(title_phase("◑ Touch probe permission file"), Some(Phase::Working));
+        assert_eq!(title_phase("✳ Touch probe permission file"), Some(Phase::Idle));
+        assert_eq!(title_phase("⠂ Claude Code"), Some(Phase::Working));
+        // Gemini CLI and Codex, from their sources.
+        assert_eq!(title_phase("◇  Ready (vibeyai)"), Some(Phase::Idle));
+        assert_eq!(title_phase("✋  Action Required (vibeyai)"), Some(Phase::Waiting));
+        assert_eq!(title_phase("✦  Reading files (vibeyai)"), Some(Phase::Working));
+        assert_eq!(title_phase("⏲  Working… (vibeyai)"), Some(Phase::Working));
+        assert_eq!(title_phase("[ ! ] Action Required"), Some(Phase::Waiting));
+        // Anything else says nothing.
+        assert_eq!(title_phase("steve@host: ~/project"), None);
+        assert_eq!(title_phase("Gemini CLI (vibeyai)"), None);
+        assert_eq!(title_phase(""), None);
+    }
+
+    #[test]
+    fn ctrl_v_stays_with_editors() {
+        assert!(ctrl_v_pastes(None));
+        assert!(ctrl_v_pastes(Some("claude")));
+        assert!(ctrl_v_pastes(Some("codex")));
+        assert!(ctrl_v_pastes(Some("agy")));
+        assert!(ctrl_v_pastes(Some("some-new-cli")));
+        assert!(ctrl_v_pastes(Some("bash")));
+        assert!(!ctrl_v_pastes(Some("vim")));
+        assert!(!ctrl_v_pastes(Some("nano")));
+        assert!(!ctrl_v_pastes(Some("tmux")));
     }
 }

@@ -36,6 +36,13 @@ Changes from the brief are marked **[rev]**.
 - 2026-10-23, **terminal alerts**: one alert per terminal until it's seen, saying what happened
   (finished / needs you / stopped). Output going quiet alone no longer alerts; it does after
   sustained work, which catches a CLI stopped by a safeguard or waiting on input.
+- 2026-11-01, **terminal alerts read the CLI's title**: going quiet produced false alerts on every pause
+  mid-turn. Claude Code and Gemini CLI say when they're working in the terminal title, so that's the
+  signal now; other AI CLIs need 15 s of silence, and non-AI programs never alert on silence.
+- 2026-11-01, **Ctrl+V pastes in terminals**: through GTK, like the right-click menu. CLIs that read the
+  clipboard themselves on `^V` fail without xclip/wl-clipboard (`agy`: "no supported clipboard tool found").
+  Editors, pagers and multiplexers keep the key, and with no text on the clipboard `^V` goes through
+  (a CLI's image paste needs it).
 - 2026-10-23, **"Copied to clipboard" toast**: a small, click-through note over the window after a
   terminal copy (`toast.rs`, reusable for other short messages).
 - 2026-10-23, **Claude Memory section in the Explorer**: Claude Code's per-project notes
@@ -114,7 +121,8 @@ finished-unseen (exited or went idle while the user was elsewhere). These roll u
 - `contents-changed` timestamps for "recent output"
 - `bell` and `child-exited` signals
 
-Claude Code rings the bell or sends OSC notifications when it finishes, which covers the main case.
+Claude Code doesn't ring the bell by default on terminals like VTE, so finishing is read from its title
+(`✳` idle or at a prompt, a spinner while working). See `title_phase` in `src/terminal.rs`.
 **[rev] Closing the window** while any terminal has a foreground job running asks for confirmation first.
 
 ## Resource panel
