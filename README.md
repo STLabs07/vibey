@@ -50,6 +50,15 @@ scripts/install.sh          # builds, installs ~/.local/bin/vibey + app menu ent
 scripts/package-deb.sh      # or build target/vibey_0.1.0_amd64.deb
 ```
 
+Pasting text works with nothing extra. When a CLI uses the clipboard itself, such as pasting an
+image or `agy`'s own copy and paste, it needs a clipboard tool. Without one, `agy` says "no
+supported clipboard tool found".
+
+```sh
+sudo apt install xclip          # X11
+sudo apt install wl-clipboard   # Wayland
+```
+
 ## Run
 
 ```sh

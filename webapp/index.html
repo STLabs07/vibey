@@ -495,6 +495,11 @@ footer .brand img { width: 26px; height: 26px; }
           <li><h3>Open a project</h3><div class="cmd"><code>vibey .</code><button class="copy-btn" type="button">Copy</button></div></li>
         </ol>
         <details class="source">
+          <summary>Using agy, or pasting images?</summary>
+          <p>Pasting text works with nothing extra. When a CLI uses the clipboard itself, such as pasting an image or <code>agy</code>'s own copy and paste, it needs a clipboard tool. On Wayland, install <code>wl-clipboard</code> instead.</p>
+          <div class="cmd"><code>sudo apt install xclip</code><button class="copy-btn" type="button">Copy</button></div>
+        </details>
+        <details class="source">
           <summary>Build from source instead</summary>
           <p>Install Rust from <a href="https://rustup.rs">rustup.rs</a> and the build tools, then run the install script from a clone of <a href="https://github.com/STLabs07/vibey">the source</a>.</p>
           <div class="cmd"><code>sudo apt install build-essential pkg-config libgtk-4-dev libvte-2.91-gtk4-dev</code><button class="copy-btn" type="button">Copy</button></div>
